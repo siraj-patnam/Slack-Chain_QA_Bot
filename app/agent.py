@@ -9,8 +9,10 @@ question can never spiral into dozens of tool calls.
 from __future__ import annotations
 
 import os
+import sqlite3
 from collections.abc import Iterator
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from langchain.agents import create_agent
 from langchain_core.language_models import BaseChatModel
@@ -19,6 +21,7 @@ from langchain_core.runnables import RunnableConfig
 from langchain_openai import ChatOpenAI
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.errors import GraphRecursionError
 from langgraph.graph.state import CompiledStateGraph
 
@@ -36,12 +39,30 @@ RECURSION_LIMIT = 40
 
 TOOLS = [run_sql, search_text, distinct_values, find_customer]
 
+# Where multi-turn thread state is persisted. A separate file from the read-only
+# knowledge base; data/ is gitignored.
+DEFAULT_CHECKPOINT_PATH = "data/checkpoints.sqlite"
+
 
 def default_model() -> ChatOpenAI:
     return ChatOpenAI(
         model=os.environ.get("OPENAI_MODEL", DEFAULT_MODEL),
         temperature=0,
     )
+
+
+def default_checkpointer() -> BaseCheckpointSaver:
+    """Persistent multi-turn memory: a SqliteSaver at ``CHECKPOINT_DB_PATH``
+    (default ``data/checkpoints.sqlite``), so a thread's history survives a
+    process restart. The connection uses ``check_same_thread=False`` because the
+    Slack bot runs the agent in background threads (SqliteSaver serializes access
+    with its own lock). PostgresSaver is the drop-in production swap."""
+    path = os.environ.get("CHECKPOINT_DB_PATH", DEFAULT_CHECKPOINT_PATH)
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(path, check_same_thread=False)
+    saver = SqliteSaver(conn)
+    saver.setup()
+    return saver
 
 
 def build_agent(
@@ -66,7 +87,13 @@ def build_default(
     checkpointer: BaseCheckpointSaver | None = None,
 ) -> CompiledStateGraph:
     """Return the active agent: the custom graph by default, or the prebuilt
-    create_agent when USE_GRAPH is falsey (a safe, always-available fallback)."""
+    create_agent when USE_GRAPH is falsey (a safe, always-available fallback).
+
+    This is the production entry point, so it persists thread memory with a
+    SqliteSaver by default; pass an explicit checkpointer (e.g. InMemorySaver) to
+    override. The lower-level build_agent / build_graph keep an in-memory default
+    so tests stay hermetic."""
+    checkpointer = checkpointer or default_checkpointer()
     if os.environ.get("USE_GRAPH", "true").lower() in ("0", "false", "no"):
         return build_agent(model=model, checkpointer=checkpointer)
     from app.graph import build_graph

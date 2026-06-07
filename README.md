@@ -4,11 +4,7 @@ A Slack bot that answers natural-language questions grounded in a SQLite knowled
 (customer calls, product details, implementation notes, internal comms, competitor
 research). Built on **LangGraph** with a hybrid SQL + FTS5 retrieval layer.
 
-> **Status:** under construction. This README is a skeleton; the full architecture
-> write-up, eval results, and run instructions land in the final polish PR.
-> The design rationale lives in **`DESIGN.md`** (hand-written).
-
-## Quick start (preview)
+## Quick start
 
 ```bash
 # 1. Install deps (uses uv)
@@ -22,6 +18,17 @@ cp .env.example .env   # then fill in OPENAI_API_KEY, SLACK_* tokens
 
 # 4. Run the checks
 make check
+
+# 5. Run the bot locally (Slack Events API webhook on :3000)
+python -m app.slack_app
+```
+
+### Run with Docker
+
+```bash
+docker build -t slack-qa-bot .
+# Mount the data dir (knowledge base + checkpoints) and pass secrets via .env:
+docker run --rm -p 3000:3000 --env-file .env -v "$PWD/data:/app/data" slack-qa-bot
 ```
 
 ## Development
@@ -52,6 +59,21 @@ Current baseline (prebuilt agent, gpt-4o):
 
 Runs require `OPENAI_API_KEY` and `LANGSMITH_API_KEY`; the experiment URL is
 printed at the end of each run for the traces and per-case feedback.
+
+## Memory & self-correction
+
+Multi-turn thread memory is checkpointed to SQLite (`SqliteSaver` at
+`data/checkpoints.sqlite`, overridable via `CHECKPOINT_DB_PATH`), so a thread's
+history survives a process restart. `PostgresSaver` is the drop-in production
+swap — same interface. Tests keep an in-memory checkpointer, so they stay
+hermetic; only the production entry point (`build_default`) persists.
+
+Bounded SQL self-correction is deliberately *not* a dedicated node. `run_sql`
+returns errors as observations rather than raising, so the agent fixes its own
+query inside the ReAct loop; the tool-call budget bounds how many times it can
+retry; and the `grade` node adds a higher-level groundedness/completeness retry.
+A bespoke retry-then-fallback node would duplicate the agent loop and reintroduce
+the brittle hand-routing the graph exists to avoid.
 
 ## Layout
 
