@@ -35,11 +35,11 @@ from evals.scoring import check_substrings, is_not_found
 
 BASELINE_PATH = Path(__file__).parent / "baseline.json"
 
-# Absolute floor, set below the prebuilt agent's observed run-to-run variance
-# (~0.50-0.67) so the gate isn't flaky; the baseline ratchet below is the real
-# regression detector. The grounding graph is expected to raise both.
-MIN_ACCURACY = 0.45
-ACCURACY_TOLERANCE = 0.10
+# Absolute floor (a meaningful minimum — the graph should beat the ~0.58
+# prebuilt level) plus a baseline ratchet that catches regressions. The
+# tolerance absorbs LLM run-to-run variance without being flaky.
+MIN_ACCURACY = 0.60
+ACCURACY_TOLERANCE = 0.15
 # Efficiency is gated on the AGGREGATE tool-call count vs baseline (stable),
 # not per-case budgets (a single case's count swings run-to-run with the LLM).
 # Per-case budgets are still recorded as LangSmith feedback for visibility.
