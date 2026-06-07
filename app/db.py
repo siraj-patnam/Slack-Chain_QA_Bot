@@ -2,7 +2,7 @@
 
 The connection is opened in ``mode=ro`` so the agent's tools physically cannot
 write, no matter what SQL the model generates. This is the first and strongest
-layer of the tool-auth story; the SQL guardrail (added next) is the second.
+layer of the tool-auth story; the ``assert_safe_select`` guardrail is the second.
 """
 
 from __future__ import annotations

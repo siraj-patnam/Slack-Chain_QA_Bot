@@ -12,6 +12,5 @@ test:
 
 check: lint type test
 
-# eval target is wired in PR3 (python -m evals.run); placeholder until then.
 eval:
-	@echo "make eval is added in PR3"
+	uv run python -m evals.run
