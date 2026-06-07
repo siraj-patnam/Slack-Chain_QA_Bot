@@ -1,38 +1,88 @@
-"""Custom StateGraph: rewrite -> agent <-> tools -> ground+cite.
+"""Custom StateGraph: rewrite -> agent <-> tools -> generate -> grade.
 
-The prebuilt agent finds the right artifacts but tends to answer from search
-snippets, missing specifics. This graph adds two nodes around the same ReAct
-loop:
+A Self-RAG style agent (LangChain's agentic-RAG + CRAG/Self-RAG patterns):
 
 * **rewrite** resolves follow-ups against thread history ("their pricing" ->
   "Acme's pricing") so multi-turn retrieval has a standalone question.
-* **ground** takes over for artifact-backed answers: it reads the FULL
-  content_text of the retrieved artifacts and writes the final answer from that
-  evidence with citations (or an honest "couldn't find"). Structured answers
-  (counts/lists) and honest refusals pass through untouched.
+* **agent** is the planner: a ReAct loop that decides for itself whether to use
+  run_sql, search_text, or both, and in what order. The LLM plans its own
+  retrieval — there is no brittle pre-classifier.
+* **generate** synthesizes the final answer grounded strictly in the evidence
+  the agent gathered (SQL rows and/or artifact content), with citations.
+* **grade** is a structured-output (Pydantic) check: is the answer grounded in
+  the evidence and complete? If not, its feedback is fed back and the agent
+  retrieves again, up to MAX_RETRIES.
 
-The prebuilt create_agent path stays available behind the USE_GRAPH flag.
+This keeps every routing/grading decision typed (no string-matching, no regex),
+and the enumerate-vs-detail distinction dissolves: generate answers from
+whatever evidence exists, and grade catches under-retrieval generically. The
+prebuilt create_agent path stays available behind the USE_GRAPH flag.
 """
 
 from __future__ import annotations
 
 import re
+from typing import cast
 
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.runnables import Runnable
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, MessagesState, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.prebuilt import ToolNode
+from pydantic import BaseModel, Field
 
 from app.agent import TOOLS, default_model
 from app.db import readonly_connection
 from app.prompt import SCHEMA_PROMPT
 
-_ID_RE = re.compile(r"art_[0-9a-f]{3,}")
-_GROUND_MAX_ARTIFACTS = 6
-_GROUND_MAX_CHARS = 2500
+# At most this many self-correction retries, so cost stays bounded.
+MAX_RETRIES = 2
+# The real retrieval budget: at most this many tool calls per question. Once
+# reached the agent stops retrieving and answers from what it has. This is a
+# count of executed tool calls, NOT graph super-steps — the RECURSION_LIMIT in
+# app.agent is only a coarse runaway guard sitting above this.
+TOOL_CALL_LIMIT = 14
+_EVIDENCE_MAX_EACH = 2000
+_EVIDENCE_MAX_TOTAL = 9000
+_ID_RE = re.compile(r"art_[0-9a-f]{6,}")
+_GROUND_MAX_ARTIFACTS = 5
+_GROUND_MAX_CHARS = 4500
+
+
+class QAState(MessagesState):
+    """Conversation messages, the self-correction retry count, and the standalone
+    question for THIS turn.
+
+    ``question`` is captured once by ``rewrite`` (the rewritten, pronoun-resolved
+    form) and read by ``generate``/``grade``. It must NOT be re-derived from the
+    last HumanMessage: a retry appends a reviewer-feedback HumanMessage, so
+    "last human message" would silently become the feedback string instead of the
+    user's actual question.
+    """
+
+    retries: int
+    question: str
+
+
+class AnswerGrade(BaseModel):
+    """Structured grade of a drafted answer against the retrieved evidence."""
+
+    grounded: bool = Field(
+        description="True if every claim in the answer is supported by the evidence. "
+        "An honest 'I couldn't find that' counts as grounded."
+    )
+    complete: bool = Field(
+        description="True if the answer addresses every part of the question, including "
+        "listing the COMPLETE set when a set of items is requested."
+    )
+    feedback: str = Field(
+        description="If grounded or complete is false, briefly say what is missing or "
+        "unsupported and what to retrieve next. Empty otherwise."
+    )
+
 
 REWRITE_PROMPT = (
     "Rewrite the user's latest question into a standalone question using the "
@@ -41,19 +91,49 @@ REWRITE_PROMPT = (
     "standalone, return it unchanged."
 )
 
-GROUND_PROMPT = (
-    "You are finalizing an answer for an internal Q&A bot, grounded strictly in "
-    "retrieved evidence. Using ONLY the evidence below (full artifact contents), "
-    "answer the question completely and specifically — include exact names, "
-    "dates, windows, commands, metrics, and the steps of any plan where present. "
-    "Cite the artifact ids you used as (source: art_...). If the evidence does "
-    "not actually support an answer, reply exactly: I couldn't find that in the "
-    "data."
+GENERATE_PROMPT = (
+    "Answer the question for an internal Q&A bot, grounded STRICTLY in the "
+    "retrieved evidence below (tool results — SQL rows and/or artifact content). "
+    "Use only this evidence. Be complete and specific: include exact names, "
+    "dates, windows, commands, metrics, and the steps of any plan; if the "
+    "question asks for a set of items, list EVERY one present in the evidence. "
+    "Cite sources: for a fact from an artifact, its id, e.g. (source: art_1a2b3c); "
+    "for a fact from a table, the column it came from, e.g. "
+    "(source: scenarios.pain_point). Never write the word 'table' as a literal "
+    "citation. If the evidence does not support an answer, say so plainly."
+)
+
+GRADE_PROMPT = (
+    "You grade a drafted answer for an internal Q&A bot. Given the QUESTION, the "
+    "EVIDENCE retrieved, and the ANSWER, judge whether it is grounded and "
+    "complete.\n"
+    "- A greeting, a description of the bot's capabilities, or a clarifying "
+    "question needs no evidence — mark it grounded and complete.\n"
+    "- But if the answer makes factual claims about the company's data while the "
+    "EVIDENCE is empty or does not support them, it is NOT grounded (the bot "
+    "should have retrieved first).\n"
+    "- If a set of accounts/items was requested, it is complete only if every "
+    "member present in the evidence is listed.\n"
+    "- An honest 'I couldn't find that in the data' is grounded and complete."
 )
 
 
+def _tool_results(messages: list) -> str:
+    """The agent's tool outputs (SQL rows, search hits, fetched content) as evidence."""
+    parts: list[str] = []
+    total = 0
+    for msg in messages:
+        if isinstance(msg, ToolMessage):
+            text = str(msg.content)[:_EVIDENCE_MAX_EACH]
+            parts.append(f"[{msg.name}]\n{text}")
+            total += len(text)
+            if total >= _EVIDENCE_MAX_TOTAL:
+                break
+    return "\n\n".join(parts)
+
+
 def _artifact_ids(messages: list) -> list[str]:
-    """Artifact ids that appeared in tool results, in first-seen order."""
+    """Artifact ids that appeared in tool results, first-seen order."""
     seen: list[str] = []
     for msg in messages:
         if isinstance(msg, ToolMessage):
@@ -63,16 +143,19 @@ def _artifact_ids(messages: list) -> list[str]:
     return seen
 
 
-def _fetch_evidence(ids: list[str]) -> str:
-    """Full content_text for the retrieved artifacts, as a labeled evidence block."""
+def _fetch_full_content(ids: list[str]) -> str:
+    """Force-fetch the FULL content_text of retrieved artifacts (the reliable
+    grounding step), so the answer is built from complete sources, not excerpts."""
     ids = ids[:_GROUND_MAX_ARTIFACTS]
     if not ids:
         return ""
     placeholders = ",".join("?" * len(ids))
     with readonly_connection() as conn:
         rows = conn.execute(
-            "SELECT artifact_id, artifact_type, title, content_text "
-            f"FROM artifacts WHERE artifact_id IN ({placeholders})",
+            "SELECT a.artifact_id AS artifact_id, a.artifact_type AS artifact_type, "
+            "a.title AS title, a.content_text AS content_text, cu.name AS customer_name "
+            "FROM artifacts a LEFT JOIN customers cu ON cu.customer_id = a.customer_id "
+            f"WHERE a.artifact_id IN ({placeholders})",
             ids,
         ).fetchall()
     by_id = {r["artifact_id"]: r for r in rows}
@@ -82,31 +165,101 @@ def _fetch_evidence(ids: list[str]) -> str:
         if row is None:
             continue
         content = str(row["content_text"])[:_GROUND_MAX_CHARS]
-        blocks.append(f"[{aid}] ({row['artifact_type']}) {row['title']}\n{content}")
+        customer = row["customer_name"] or "(no customer)"
+        meta = f"({row['artifact_type']}, customer: {customer})"
+        blocks.append(f"[{aid}] {meta} {row['title']}\n{content}")
     return "\n\n---\n\n".join(blocks)
+
+
+def _last_human_text(messages: list) -> str:
+    return next((str(m.content) for m in reversed(messages) if isinstance(m, HumanMessage)), "")
+
+
+def _last_ai_text(messages: list) -> str:
+    return next(
+        (str(m.content) for m in reversed(messages) if isinstance(m, AIMessage) and m.content),
+        "",
+    )
+
+
+def _tool_call_count(messages: list) -> int:
+    """Number of tool calls executed so far this run (the retrieval budget unit)."""
+    return sum(1 for m in messages if isinstance(m, ToolMessage))
+
+
+def _budget_stop_messages(messages: list) -> list[ToolMessage]:
+    """Synthetic responses for tool_calls on the trailing AIMessage that the
+    budget left unexecuted.
+
+    When ``_budget_reached`` routes a tool-calling AIMessage straight to
+    ``generate``, it skips the tools node, so those calls get no ToolMessage. That
+    is fine within the turn (generate/grade build isolated prompts), but the
+    checkpointer SAVES the history — and on the next turn ``agent`` replays it to
+    the model, which rejects an assistant tool_calls message not followed by a
+    ToolMessage per id. Closing the calls out here keeps the saved history valid.
+    """
+    if not messages:
+        return []
+    last = messages[-1]
+    if not isinstance(last, AIMessage) or not last.tool_calls:
+        return []
+    return [
+        ToolMessage(
+            content="Retrieval budget reached; this call was not executed.",
+            tool_call_id=tc["id"],
+            name=tc.get("name", ""),
+        )
+        for tc in last.tool_calls
+    ]
+
+
+def _budget_reached(messages: list) -> bool:
+    """The retrieval budget (TOOL_CALL_LIMIT) is spent.
+
+    Centralized so the agent-router and the grader stay in lockstep: the router
+    stops the tool loop and the grader stops requesting retries at the SAME
+    point. That lockstep is load-bearing — when the budget cuts the loop short,
+    the last AIMessage still carries unsatisfied tool_calls; if the grader then
+    requested a retry, that message would be re-sent to the model and the API
+    would reject it. Both call this one predicate so the invariant can't drift.
+    """
+    return _tool_call_count(messages) >= TOOL_CALL_LIMIT
 
 
 def _route_after_agent(state: MessagesState) -> str:
     last = state["messages"][-1]
     if isinstance(last, AIMessage) and last.tool_calls:
+        if _budget_reached(state["messages"]):
+            return "generate"  # budget spent — answer from what was gathered
         return "tools"
-    return "ground"
+    return "generate"
+
+
+def _route_after_grade(state: MessagesState) -> str:
+    # grade appends a HumanMessage with feedback only when it wants a retry.
+    return "agent" if isinstance(state["messages"][-1], HumanMessage) else "end"
 
 
 def build_graph(
     model: BaseChatModel | None = None,
+    grader: Runnable | None = None,
     checkpointer: BaseCheckpointSaver | None = None,
 ) -> CompiledStateGraph:
     base = model or default_model()
+    grader = grader if grader is not None else base.with_structured_output(AnswerGrade)
     model_with_tools = base.bind_tools(TOOLS)
     tool_node = ToolNode(TOOLS)
 
-    def rewrite(state: MessagesState) -> dict:
+    def rewrite(state: QAState) -> dict:
         messages = state["messages"]
         humans = [m for m in messages if isinstance(m, HumanMessage)]
-        if len(humans) <= 1:
-            return {}  # first turn: nothing to resolve
+        if not humans:
+            return {}
         latest = humans[-1]
+        if len(humans) <= 1:
+            # First turn: already standalone. Still record it as the turn's
+            # question so generate/grade never fall back to scanning messages.
+            return {"question": str(latest.content)}
         context = "\n".join(
             f"{'User' if isinstance(m, HumanMessage) else 'Bot'}: {m.content}"
             for m in messages
@@ -120,38 +273,97 @@ def build_graph(
                 ),
             ]
         )
+        standalone = str(resolved.content)
         # Same id replaces the original human turn via the add_messages reducer.
-        return {"messages": [HumanMessage(content=str(resolved.content), id=latest.id)]}
+        return {
+            "messages": [HumanMessage(content=standalone, id=latest.id)],
+            "question": standalone,
+        }
 
     def agent(state: MessagesState) -> dict:
         messages = [SystemMessage(content=SCHEMA_PROMPT), *state["messages"]]
         return {"messages": [model_with_tools.invoke(messages)]}
 
-    def ground(state: MessagesState) -> dict:
+    def generate(state: QAState) -> dict:
         messages = state["messages"]
-        ids = _artifact_ids(messages)
-        if not ids:
-            return {}  # structured answer or honest refusal — leave the draft as-is
-        evidence = _fetch_evidence(ids)
-        if not evidence:
-            return {}
-        question = next((m.content for m in reversed(messages) if isinstance(m, HumanMessage)), "")
-        final = base.invoke(
+        # Close out any tool_calls the budget left dangling, so the SAVED history
+        # is valid on the next turn (see _budget_stop_messages).
+        stop = _budget_stop_messages(messages)
+        last = messages[-1]
+        agent_answered = isinstance(last, AIMessage) and bool(last.content) and not last.tool_calls
+        full = _fetch_full_content(_artifact_ids(messages))
+        # When the agent already produced an answer and there is no FULL artifact
+        # content to add, keep that answer. Grounding only earns its keep by
+        # replacing a search-EXCERPT answer with the complete source; with no
+        # artifacts retrieved (a refusal, or a structured run_sql enumeration) the
+        # agent already saw exactly these rows, so re-synthesizing adds nothing and
+        # can only lose set members or mangle a citation.
+        if agent_answered and not full:
+            return {"messages": stop} if stop else {}
+        # Otherwise synthesize: either to ground an excerpt answer in full artifact
+        # content, or because the tool-call budget stopped the agent before it
+        # answered and we must answer from whatever was gathered.
+        tool_evidence = _tool_results(messages)
+        if not tool_evidence and not full:
+            return {"messages": stop} if stop else {}
+        question = state.get("question") or _last_human_text(messages)
+        evidence = tool_evidence
+        if full:
+            evidence = f"{tool_evidence}\n\n--- full artifact content ---\n\n{full}"
+        answer = base.invoke(
             [
-                SystemMessage(content=GROUND_PROMPT),
+                SystemMessage(content=GENERATE_PROMPT),
                 HumanMessage(content=f"Question:\n{question}\n\nEvidence:\n{evidence}"),
             ]
         )
-        return {"messages": [AIMessage(content=str(final.content))]}
+        return {"messages": [*stop, AIMessage(content=str(answer.content))]}
 
-    graph = StateGraph(MessagesState)
+    def grade(state: QAState) -> dict:
+        if state.get("retries", 0) >= MAX_RETRIES:
+            return {}  # retry budget spent — accept the current answer
+        if _budget_reached(state["messages"]):
+            return {}  # tool budget spent — no point asking the agent to retrieve more
+        messages = state["messages"]
+        question = state.get("question") or _last_human_text(messages)
+        result = cast(
+            AnswerGrade,
+            grader.invoke(
+                [
+                    SystemMessage(content=GRADE_PROMPT),
+                    HumanMessage(
+                        content=(
+                            f"QUESTION:\n{question}\n\n"
+                            f"EVIDENCE:\n{_tool_results(messages) or '(none)'}\n\n"
+                            f"ANSWER:\n{_last_ai_text(messages)}"
+                        )
+                    ),
+                ]
+            ),
+        )
+        if result.grounded and result.complete:
+            return {}
+        return {
+            "messages": [
+                HumanMessage(
+                    content=f"A reviewer flagged the previous answer: {result.feedback} "
+                    "Retrieve what you still need and answer again."
+                )
+            ],
+            "retries": state.get("retries", 0) + 1,
+        }
+
+    graph = StateGraph(QAState)
     graph.add_node("rewrite", rewrite)
     graph.add_node("agent", agent)
     graph.add_node("tools", tool_node)
-    graph.add_node("ground", ground)
+    graph.add_node("generate", generate)
+    graph.add_node("grade", grade)
     graph.add_edge(START, "rewrite")
     graph.add_edge("rewrite", "agent")
-    graph.add_conditional_edges("agent", _route_after_agent, {"tools": "tools", "ground": "ground"})
+    graph.add_conditional_edges(
+        "agent", _route_after_agent, {"tools": "tools", "generate": "generate"}
+    )
     graph.add_edge("tools", "agent")
-    graph.add_edge("ground", END)
+    graph.add_edge("generate", "grade")
+    graph.add_conditional_edges("grade", _route_after_grade, {"agent": "agent", "end": END})
     return graph.compile(checkpointer=checkpointer or InMemorySaver())
