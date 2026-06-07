@@ -196,9 +196,7 @@ def _distinct_values(table: str, column: str) -> str:
     with readonly_connection() as conn:
         tables = {
             r[0]
-            for r in conn.execute(
-                "SELECT name FROM sqlite_master WHERE type IN ('table', 'view')"
-            )
+            for r in conn.execute("SELECT name FROM sqlite_master WHERE type IN ('table', 'view')")
         }
         if table not in tables:
             listed = ", ".join(sorted(t for t in tables if not t.startswith("sqlite_")))
