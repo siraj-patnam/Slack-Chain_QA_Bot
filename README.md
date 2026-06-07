@@ -40,3 +40,15 @@ app/      # bot, agent, tools, db, prompt
 evals/    # eval harness (added in PR3)
 tests/    # unit tests
 ```
+
+## CI & branch protection
+
+CI (`.github/workflows/ci.yml`) runs `make check` on every PR to `main` and on
+pushes to `main`. `main` is protected:
+
+- Require the **CI / check** status check to pass before merging.
+- Require branches to be up to date before merging.
+- Disallow direct pushes to `main` (work on `feat/<n>-<name>` branches → PR → squash-merge).
+
+From PR3 onward, CI also runs `make eval` as a regression gate (see `evals/BASELINE.md`).
+
