@@ -2,8 +2,7 @@
 
 Priming the agent with the full schema up front is the single biggest lever for
 tool-call efficiency ("3 calls, not 30"): the model never wastes turns
-rediscovering tables, columns, or where the long-form text lives. Written from
-direct inspection of the database, not from memory.
+rediscovering tables, columns, or where the long-form text lives.
 """
 
 SCHEMA_PROMPT = """\
