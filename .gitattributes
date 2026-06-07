@@ -1,0 +1,6 @@
+# Normalize line endings to LF so ruff format --check is consistent
+# between local (Windows) and CI (Linux).
+* text=auto eol=lf
+*.png binary
+*.sqlite binary
+*.zip binary

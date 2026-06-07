@@ -1,0 +1,29 @@
+name: CI
+
+# Runs the same `make check` gate used locally, on every PR to main and on
+# pushes to main. Branch protection (documented in the README) requires this
+# job to pass before a PR can be merged.
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      - name: Run checks (lint, type, test)
+        run: make check

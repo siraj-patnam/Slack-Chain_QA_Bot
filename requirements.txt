@@ -1,0 +1,10 @@
+# Runtime dependencies (mirror of [project.dependencies] in pyproject.toml).
+# Source of truth is pyproject.toml + uv.lock; this file exists for the Dockerfile
+# and pip-based installs. Dev tools (ruff/mypy/pytest) live in the `dev` group.
+langgraph>=1.0
+langchain>=1.0
+langchain-openai>=1.0
+slack-bolt>=1.21
+sqlglot>=25.0
+langsmith>=0.2
+python-dotenv>=1.0
