@@ -27,6 +27,18 @@ _NOT_FOUND_MARKERS = (
     "no stock",
     "not available",
     "no real-time",
+    # data-grounded refusals the agent actually produces ("the evidence does not
+    # provide ...", "I cannot answer ... based on the available data")
+    "cannot answer",
+    "can't answer",
+    "does not provide",
+    "doesn't provide",
+    "does not contain",
+    "doesn't contain",
+    "does not include",
+    "doesn't include",
+    "does not specify",
+    "doesn't specify",
 )
 
 

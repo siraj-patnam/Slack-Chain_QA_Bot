@@ -112,7 +112,10 @@ EXAMPLE_CASES = [
             "duplicate-action problems?"
         ),
         max_tool_calls=28,
-        must_include=("BlueHarbor", "taxonomy"),
+        # One member from EACH group, so a one-sided answer (the common failure —
+        # listing only the taxonomy group) fails the anchor instead of sneaking
+        # past on taxonomy-only tokens.
+        must_include=("BlueHarbor", "MedLogix"),
         rubric=(
             "Splits the accounts into a taxonomy/search-semantics group (Arcadia "
             "Cloudworks, BlueHarbor Logistics, CedarWind Renewables, HelioFab "
@@ -183,4 +186,54 @@ AUTHORED_CASES = [
     ),
 ]
 
-CASES: list[EvalCase] = [*EXAMPLE_CASES, *AUTHORED_CASES]
+# HELD-OUT cases: a generalization gate. These exercise the SAME general methods
+# the prompt teaches (split a population by its classifying column, named-entity
+# lookup, structured count, honest refusal) but over data the prompt was NEVER
+# tuned against — different regions, different customers, different categories.
+#
+# DISCIPLINE: do NOT tune the prompt against these. If an EXAMPLE_CASE passes but
+# its held-out twin fails, the prompt has memorized the example rather than
+# learning the method. They are scored alongside the rest so that overfitting to
+# EXAMPLE_CASES shows up as a held-out regression.
+HELDOUT_CASES = [
+    EvalCase(
+        name="held_nordics_split",
+        question=(
+            "Among our Nordics accounts, which ones are dealing with renewal risk "
+            "from noisy alerting versus executive-dashboard reporting latency?"
+        ),
+        max_tool_calls=8,
+        must_include=("NordChemica", "FrostGrid"),
+        rubric=(
+            "Splits the Nordics accounts into a 'renewal risk from noisy alerting' "
+            "group (NordChemica AB, NordMed Distribution AB, NordGrid Services AB, "
+            "Aurora Dataworks AB, Fyrkrona Renewables AB, NordFryst AB, NordicChem "
+            "AB) and an 'executive-dashboard reporting latency' group (FrostGrid "
+            "Energi AB, NorrLog Freight AB, Svenska PolyChem AB, Nordic MedSupply "
+            "AB, SentinelOps AB, Nordiska Grid Services AB). Getting most accounts "
+            "into the right group counts as correct."
+        ),
+    ),
+    EvalCase(
+        name="held_nordics_count",
+        question="How many customers are in the Nordics region?",
+        max_tool_calls=4,
+        score_mode="substring",
+        must_include=("13",),
+    ),
+    EvalCase(
+        name="held_nordchemica_region",
+        question="What region is NordChemica in?",
+        max_tool_calls=6,
+        score_mode="substring",
+        must_include=("Nordics",),
+    ),
+    EvalCase(
+        name="held_not_in_data",
+        question="How many employees does the competitor NoiseGuard have?",
+        max_tool_calls=6,
+        score_mode="not_found",
+    ),
+]
+
+CASES: list[EvalCase] = [*EXAMPLE_CASES, *AUTHORED_CASES, *HELDOUT_CASES]
