@@ -13,11 +13,20 @@ _NOT_FOUND_MARKERS = (
     "unable to find",
     "don't have",
     "do not have",
+    "don't have access",
+    "can't provide",
+    "cannot provide",
     "not in the data",
     "no information",
     "no data",
     "isn't in the",
     "is not in the",
+    "fictional",
+    "not a public",
+    "isn't a public",
+    "no stock",
+    "not available",
+    "no real-time",
 )
 
 

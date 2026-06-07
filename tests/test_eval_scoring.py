@@ -17,6 +17,7 @@ def test_check_substrings_missing_one() -> None:
 def test_is_not_found_detects_refusal() -> None:
     assert is_not_found("I couldn't find that in the data.")
     assert is_not_found("We do not have a stock price for Northstar Signal.")
+    assert is_not_found("I can't provide that; Northstar Signal is a fictional company.")
 
 
 def test_is_not_found_false_for_real_answer() -> None:
