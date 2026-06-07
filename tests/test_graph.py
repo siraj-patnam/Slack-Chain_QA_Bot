@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from pathlib import Path
 
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
-from app.agent import ask
+from app.agent import ask, default_checkpointer
 from app.graph import AnswerGrade, _route_after_agent, _route_after_grade, build_graph
 
 
@@ -151,3 +152,33 @@ def test_no_retrieval_keeps_agent_answer(
     result = ask(graph, "what is Northstar's stock price?", thread_id="g3")
     assert result.answer == "I couldn't find that in the data."
     assert result.tool_calls == []
+
+
+@pytest.mark.usefixtures("seeded_db")
+def test_sqlite_checkpointer_persists_thread_across_instances(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fake_model: Callable[[list[AIMessage]], object],
+    fake_grader: Callable[[list[object]], object],
+) -> None:
+    # default_checkpointer persists to CHECKPOINT_DB_PATH; a thread's state must be
+    # readable by a fresh saver on the same file — i.e. it survives a restart.
+    monkeypatch.setenv("CHECKPOINT_DB_PATH", str(tmp_path / "cp.sqlite"))
+    config = {"configurable": {"thread_id": "persist-1"}}
+
+    graph = build_graph(
+        model=fake_model([AIMessage(content="remembered answer")]),
+        grader=fake_grader([AnswerGrade(grounded=True, complete=True, feedback="")]),
+        checkpointer=default_checkpointer(),
+    )
+    graph.invoke({"messages": [HumanMessage("hi")]}, config)  # type: ignore[arg-type]
+
+    # A brand-new saver + graph on the same file see the saved thread.
+    reopened = build_graph(
+        model=fake_model([]),
+        grader=fake_grader([]),
+        checkpointer=default_checkpointer(),
+    )
+    state = reopened.get_state(config)  # type: ignore[arg-type]
+    contents = [getattr(m, "content", None) for m in state.values["messages"]]
+    assert "remembered answer" in contents

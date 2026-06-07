@@ -53,6 +53,21 @@ Current baseline (prebuilt agent, gpt-4o):
 Runs require `OPENAI_API_KEY` and `LANGSMITH_API_KEY`; the experiment URL is
 printed at the end of each run for the traces and per-case feedback.
 
+## Memory & self-correction
+
+Multi-turn thread memory is checkpointed to SQLite (`SqliteSaver` at
+`data/checkpoints.sqlite`, overridable via `CHECKPOINT_DB_PATH`), so a thread's
+history survives a process restart. `PostgresSaver` is the drop-in production
+swap — same interface. Tests keep an in-memory checkpointer, so they stay
+hermetic; only the production entry point (`build_default`) persists.
+
+Bounded SQL self-correction is deliberately *not* a dedicated node. `run_sql`
+returns errors as observations rather than raising, so the agent fixes its own
+query inside the ReAct loop; the tool-call budget bounds how many times it can
+retry; and the `grade` node adds a higher-level groundedness/completeness retry.
+A bespoke retry-then-fallback node would duplicate the agent loop and reintroduce
+the brittle hand-routing the graph exists to avoid.
+
 ## Layout
 
 ```
