@@ -5,32 +5,26 @@ intended, reviewed improvement (`python -m evals.run --update`).
 
 | Metric | Value |
 |---|---|
-| Agent | prebuilt `create_agent` (gpt-4o) |
+| Agent | custom StateGraph (rewrite → agent ⇄ tools → ground), gpt-4o |
 | Judge | openevals correctness (gpt-4o-mini) |
-| Accuracy | **58.3%** (7 / 12) |
-| Total tool calls | **59** |
+| Accuracy | **83.3%** (10 / 12) |
+| Total tool calls | **68** |
 
-Per-case (representative):
+## Improvement over the prebuilt agent
 
-| Case | Correct | Notes |
+| Agent | Accuracy | Tool calls |
 |---|---|---|
-| ex1 BlueHarbor proof plan | no | right customer; proof-plan specifics incomplete |
-| ex2 Verdant Bay patch/rollback | no | window right; exact rollback step incomplete |
-| ex3 MapleHarvest transform/workshop | no | mappings right; workshop output vague |
-| ex4 Aureum SCIM fix | no | fields right; Jin's fix only half captured |
-| ex5 defection risk / milestone | no | entity unstable run-to-run; milestone vague |
-| ex6 NA-West taxonomy vs duplicate | yes | groups largely correct |
-| ex7 Canada approval-bypass | yes | pattern + names correct |
-| auth count customer calls | yes | 50 |
-| auth BlueHarbor region | yes | North America West |
-| auth products | yes | all four |
-| auth cheap tactical competitor | yes | NoiseGuard |
-| auth not-in-data | yes | honest refusal |
+| Prebuilt `create_agent` | 58.3% (7/12) | 59 |
+| Custom graph + grounding | **83.3% (10/12)** | 68 |
 
-The misses are concentrated in the detail-heavy example queries (ex1–ex5): the
-prebuilt agent answers from search snippets rather than the full artifact. The
-grounding/citation graph is expected to raise accuracy here; when it does, this
-baseline is re-recorded upward.
+The lift comes from the grounding node: the prebuilt agent answered the
+detail-heavy example queries (ex1–ex5) from search snippets and missed
+specifics; the graph re-answers those from the full `content_text` of the
+retrieved artifacts, recovering the exact dates, windows, metrics, and plan
+steps — while structured answers (counts/lists) and honest refusals pass
+through unchanged.
 
-Per-run details and traces are in the LangSmith experiment for each run
-(`make eval` prints the experiment URL).
+Set `USE_GRAPH=false` to fall back to the prebuilt agent.
+
+Per-run traces and per-case feedback are in the LangSmith experiment whose URL
+`make eval` prints.

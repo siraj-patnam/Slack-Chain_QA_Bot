@@ -15,7 +15,7 @@ from collections import Counter
 
 from dotenv import load_dotenv
 
-from app.agent import ask, build_agent
+from app.agent import ask, build_default
 
 
 def main() -> None:
@@ -30,7 +30,7 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    agent = build_agent()
+    agent = build_default()
     result = ask(agent, args.question, thread_id=args.thread)
 
     print(result.answer)

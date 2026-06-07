@@ -24,7 +24,7 @@ from fastapi.responses import JSONResponse
 from langgraph.graph.state import CompiledStateGraph
 from slack_sdk import WebClient
 
-from app.agent import AgentProgress, build_agent, stream_run
+from app.agent import AgentProgress, build_default, stream_run
 from app.slack_verify import verify_slack_signature
 
 _MENTION_RE = re.compile(r"<@[A-Z0-9]+>")
@@ -93,7 +93,7 @@ def create_app(
 ) -> FastAPI:
     """Build the FastAPI app. Dependencies are injectable for testing."""
     api = FastAPI()
-    agent = agent if agent is not None else build_agent()
+    agent = agent if agent is not None else build_default()
     client = client or WebClient(token=os.environ["SLACK_BOT_TOKEN"])
     secret = signing_secret or os.environ["SLACK_SIGNING_SECRET"]
     if bot_user_id is None:
