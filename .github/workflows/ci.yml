@@ -27,3 +27,34 @@ jobs:
 
       - name: Run checks (lint, type, test)
         run: make check
+
+  # Eval regression gate. Runs only on PRs to main (calls the model, so it costs
+  # money — we don't run it on every push). Fetches the public knowledge-base DB
+  # since the .sqlite is gitignored.
+  eval:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      - name: Fetch knowledge-base DB
+        run: |
+          mkdir -p data
+          curl -fsSL -o data/synthetic_startup.sqlite \
+            https://raw.githubusercontent.com/langchain-ai/applied-ai-take-home-database/main/synthetic_startup.sqlite
+
+      - name: Run eval (accuracy + tool-call regression gate)
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          LANGSMITH_API_KEY: ${{ secrets.LANGSMITH_API_KEY }}
+          LANGSMITH_TRACING: "true"
+        run: make eval

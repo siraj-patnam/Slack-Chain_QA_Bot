@@ -12,6 +12,7 @@ dependencies = [
     "sqlglot>=25.0",
     "langsmith>=0.2",
     "python-dotenv>=1.0",
+    "openevals>=0.2.0",
 ]
 
 [dependency-groups]

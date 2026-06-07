@@ -1,9 +1,9 @@
 """The prebuilt agent: an LLM that uses the retrieval tools in a bounded loop.
 
-This is the first working version, built on LangChain's ``create_agent`` (the
-current v1 ReAct agent). It is deliberately small — model + two tools + the
-schema-primed prompt + a checkpointer for multi-turn memory + a hard recursion
-limit so a single question can never spiral into dozens of tool calls.
+Built on LangChain's ``create_agent`` (the current v1 ReAct agent). It is
+deliberately small — model + two tools + the schema-primed prompt + a
+checkpointer for multi-turn memory + a hard recursion limit so a single
+question can never spiral into dozens of tool calls.
 """
 
 from __future__ import annotations

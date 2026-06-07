@@ -32,12 +32,32 @@ make check
 | `make type`  | `mypy app/` |
 | `make test`  | `pytest -q` |
 | `make check` | all of the above (the green/red gate) |
+| `make eval`  | run the golden eval as a LangSmith experiment + regression gate |
+
+## Evaluation
+
+`make eval` runs the golden set (the example queries + authored cases + an
+honest-refusal case) as a **LangSmith experiment**: each case is scored with an
+`openevals` correctness judge (prose) or substring/refusal checks (structured),
+plus a per-case tool-call budget. Every run is traced to LangSmith, and a
+committed baseline (`evals/baseline.json`, documented in `evals/BASELINE.md`)
+fails the build on any accuracy or tool-call regression.
+
+Current baseline (prebuilt agent, gpt-4o):
+
+| Metric | Value |
+|---|---|
+| Accuracy | 58.3% (7/12) |
+| Total tool calls | 59 |
+
+Runs require `OPENAI_API_KEY` and `LANGSMITH_API_KEY`; the experiment URL is
+printed at the end of each run for the traces and per-case feedback.
 
 ## Layout
 
 ```
 app/      # bot, agent, tools, db, prompt
-evals/    # eval harness (added in PR3)
+evals/    # eval harness
 tests/    # unit tests
 ```
 
@@ -48,7 +68,7 @@ pushes to `main`. `main` is protected:
 
 - Require the **CI / check** status check to pass before merging.
 - Require branches to be up to date before merging.
-- Disallow direct pushes to `main` (work on `feat/<n>-<name>` branches → PR → squash-merge).
+- Disallow direct pushes to `main` (work on feature branches → PR → squash-merge).
 
-From PR3 onward, CI also runs `make eval` as a regression gate (see `evals/BASELINE.md`).
+CI also runs `make eval` as a regression gate (see `evals/BASELINE.md`).
 
