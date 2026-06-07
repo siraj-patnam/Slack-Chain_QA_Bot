@@ -1,0 +1,20 @@
+# Keep the build context small and never ship local/dev artifacts or data.
+.git
+.github
+.venv
+**/__pycache__
+*.pyc
+.pytest_cache
+.mypy_cache
+.ruff_cache
+
+# Data (knowledge base + checkpoints) is mounted at runtime, never baked in.
+data/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+
+# Secrets and things the runtime image doesn't need.
+.env
+tests/
+evals/
