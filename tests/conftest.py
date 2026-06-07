@@ -9,10 +9,56 @@ network — while exercising the exact MATCH→join path used in production.
 from __future__ import annotations
 
 import sqlite3
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator, Sequence
 from pathlib import Path
+from typing import Any
 
 import pytest
+from langchain_core.callbacks import CallbackManagerForLLMRun
+from langchain_core.language_models import BaseChatModel
+from langchain_core.messages import AIMessage, BaseMessage
+from langchain_core.outputs import ChatGeneration, ChatResult
+
+
+class FakeToolCallingModel(BaseChatModel):
+    """A chat model that returns a fixed script of AIMessages in order.
+
+    Supports ``bind_tools`` (a no-op returning itself) so it can stand in for a
+    tool-calling model inside ``create_agent``. Each invocation returns the next
+    scripted message, letting a test choreograph a deterministic tool-call loop.
+    """
+
+    responses: list[AIMessage]
+    index: int = 0
+
+    @property
+    def _llm_type(self) -> str:
+        return "fake-tool-calling"
+
+    def _generate(
+        self,
+        messages: list[BaseMessage],
+        stop: list[str] | None = None,
+        run_manager: CallbackManagerForLLMRun | None = None,
+        **kwargs: Any,
+    ) -> ChatResult:
+        message = self.responses[self.index]
+        self.index += 1
+        return ChatResult(generations=[ChatGeneration(message=message)])
+
+    def bind_tools(self, tools: Sequence[Any], **kwargs: Any) -> BaseChatModel:
+        return self
+
+
+@pytest.fixture
+def fake_model() -> Callable[[list[AIMessage]], FakeToolCallingModel]:
+    """Factory: build a FakeToolCallingModel from a list of scripted AIMessages."""
+
+    def _make(responses: list[AIMessage]) -> FakeToolCallingModel:
+        return FakeToolCallingModel(responses=responses)
+
+    return _make
+
 
 # (artifact_id, type, title, summary, content_text)
 _SEED_ARTIFACTS = [
