@@ -35,7 +35,7 @@ RECURSION_LIMIT = 14
 TOOLS = [run_sql, search_text]
 
 
-def _default_model() -> ChatOpenAI:
+def default_model() -> ChatOpenAI:
     return ChatOpenAI(
         model=os.environ.get("OPENAI_MODEL", DEFAULT_MODEL),
         temperature=0,
@@ -52,11 +52,24 @@ def build_agent(
     in production it defaults to ChatOpenAI configured from the environment.
     """
     return create_agent(
-        model=model or _default_model(),
+        model=model or default_model(),
         tools=TOOLS,
         system_prompt=SCHEMA_PROMPT,
         checkpointer=checkpointer or InMemorySaver(),
     )
+
+
+def build_default(
+    model: BaseChatModel | None = None,
+    checkpointer: BaseCheckpointSaver | None = None,
+) -> CompiledStateGraph:
+    """Return the active agent: the custom graph by default, or the prebuilt
+    create_agent when USE_GRAPH is falsey (a safe, always-available fallback)."""
+    if os.environ.get("USE_GRAPH", "true").lower() in ("0", "false", "no"):
+        return build_agent(model=model, checkpointer=checkpointer)
+    from app.graph import build_graph
+
+    return build_graph(model=model, checkpointer=checkpointer)
 
 
 @dataclass

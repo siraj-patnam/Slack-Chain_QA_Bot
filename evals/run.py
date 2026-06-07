@@ -29,7 +29,7 @@ from langsmith import Client, evaluate
 from openevals.llm import create_llm_as_judge
 from openevals.prompts import CORRECTNESS_PROMPT
 
-from app.agent import ask, build_agent
+from app.agent import ask, build_default
 from evals.dataset import ensure_dataset
 from evals.scoring import check_substrings, is_not_found
 
@@ -117,7 +117,7 @@ def main() -> int:
     client = Client()
     dataset_name = ensure_dataset(client, recreate=args.sync)
 
-    agent = build_agent()
+    agent = build_default()
     results = evaluate(
         _make_target(agent),
         data=dataset_name,
