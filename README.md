@@ -4,11 +4,7 @@ A Slack bot that answers natural-language questions grounded in a SQLite knowled
 (customer calls, product details, implementation notes, internal comms, competitor
 research). Built on **LangGraph** with a hybrid SQL + FTS5 retrieval layer.
 
-> **Status:** under construction. This README is a skeleton; the full architecture
-> write-up, eval results, and run instructions land in the final polish PR.
-> The design rationale lives in **`DESIGN.md`** (hand-written).
-
-## Quick start (preview)
+## Quick start
 
 ```bash
 # 1. Install deps (uses uv)
@@ -22,6 +18,17 @@ cp .env.example .env   # then fill in OPENAI_API_KEY, SLACK_* tokens
 
 # 4. Run the checks
 make check
+
+# 5. Run the bot locally (Slack Events API webhook on :3000)
+python -m app.slack_app
+```
+
+### Run with Docker
+
+```bash
+docker build -t slack-qa-bot .
+# Mount the data dir (knowledge base + checkpoints) and pass secrets via .env:
+docker run --rm -p 3000:3000 --env-file .env -v "$PWD/data:/app/data" slack-qa-bot
 ```
 
 ## Development
