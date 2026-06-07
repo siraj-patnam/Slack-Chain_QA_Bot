@@ -60,10 +60,42 @@ def fake_model() -> Callable[[list[AIMessage]], FakeToolCallingModel]:
     return _make
 
 
-# (artifact_id, type, title, summary, content_text)
+class FakeGrader:
+    """Stands in for ``model.with_structured_output(...)``; returns scripted grades."""
+
+    def __init__(self, grades: list[Any]) -> None:
+        self._grades = grades
+        self._index = 0
+
+    def invoke(self, *args: Any, **kwargs: Any) -> Any:
+        grade = self._grades[self._index]
+        self._index += 1
+        return grade
+
+
+@pytest.fixture
+def fake_grader() -> Callable[[list[Any]], FakeGrader]:
+    """Factory: build a FakeGrader from a list of scripted grade objects."""
+
+    def _make(grades: list[Any]) -> FakeGrader:
+        return FakeGrader(grades)
+
+    return _make
+
+
+# (customer_id, name, region, account_health)
+_SEED_CUSTOMERS = [
+    ("cust_bh", "BlueHarbor Logistics", "North America West", "at risk"),
+    ("cust_vb", "City of Verdant Bay", "Canada", "recovering"),
+    ("cust_mh", "MapleHarvest Grocers", "Canada", "watch list"),
+    ("cust_au", "Aureum Payments Pty Ltd", "ANZ", "recovering"),
+]
+
+# (artifact_id, customer_id, type, title, summary, content_text)
 _SEED_ARTIFACTS = [
     (
-        "art_001",
+        "art_0000000000a1",
+        "cust_bh",
         "customer_call",
         "QBR call with BlueHarbor Logistics",
         "Search relevance degraded after the taxonomy rollout; renewal at risk.",
@@ -73,7 +105,8 @@ _SEED_ARTIFACTS = [
         "top-5 hit rate before renewal.",
     ),
     (
-        "art_002",
+        "art_0000000000a2",
+        "cust_vb",
         "internal_document",
         "Verdant Bay emergency playbook",
         "Approved live patch window and rollback procedure.",
@@ -82,7 +115,8 @@ _SEED_ARTIFACTS = [
         "the prior ruleset and replay the invalidation hook.",
     ),
     (
-        "art_003",
+        "art_0000000000a3",
+        "cust_mh",
         "internal_communication",
         "MapleHarvest Quebec pilot schema transform",
         "Temporary router transform maps fields ahead of the workshop.",
@@ -91,7 +125,8 @@ _SEED_ARTIFACTS = [
         "Quebec pilot.",
     ),
     (
-        "art_004",
+        "art_0000000000a4",
+        "cust_au",
         "support_ticket",
         "Aureum SCIM attribute conflict",
         "Conflicting department and businessUnit SCIM fields.",
@@ -107,8 +142,19 @@ def _build_db(path: Path) -> None:
     try:
         conn.execute(
             """
+            CREATE TABLE customers (
+              customer_id TEXT PRIMARY KEY,
+              name TEXT NOT NULL,
+              region TEXT NOT NULL,
+              account_health TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
             CREATE TABLE artifacts (
               artifact_id TEXT PRIMARY KEY,
+              customer_id TEXT,
               artifact_type TEXT NOT NULL,
               title TEXT NOT NULL,
               created_at TEXT NOT NULL,
@@ -126,10 +172,11 @@ def _build_db(path: Path) -> None:
             )
             """
         )
-        for aid, atype, title, summary, content in _SEED_ARTIFACTS:
+        conn.executemany("INSERT INTO customers VALUES (?, ?, ?, ?)", _SEED_CUSTOMERS)
+        for aid, cid, atype, title, summary, content in _SEED_ARTIFACTS:
             conn.execute(
-                "INSERT INTO artifacts VALUES (?, ?, ?, '2026-03-01T00:00:00Z', ?, ?, '{}')",
-                (aid, atype, title, summary, content),
+                "INSERT INTO artifacts VALUES (?, ?, ?, ?, '2026-03-01T00:00:00Z', ?, ?, '{}')",
+                (aid, cid, atype, title, summary, content),
             )
             conn.execute(
                 "INSERT INTO artifacts_fts (artifact_id, title, summary, content_text) "

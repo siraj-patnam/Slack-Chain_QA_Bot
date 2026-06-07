@@ -23,16 +23,18 @@ from langgraph.errors import GraphRecursionError
 from langgraph.graph.state import CompiledStateGraph
 
 from app.prompt import SCHEMA_PROMPT
-from app.tools import run_sql, search_text
+from app.tools import distinct_values, find_customer, run_sql, search_text
 
 DEFAULT_MODEL = "gpt-4o"
 
-# Hard cap on graph super-steps. A ReAct turn costs ~2 steps per tool call
-# (model node + tool node), so ~14 comfortably allows a handful of tool calls
-# while still stopping a runaway loop.
-RECURSION_LIMIT = 14
+# Coarse runaway guard on graph super-steps. The REAL retrieval budget is
+# graph.TOOL_CALL_LIMIT (14 tool calls); this just sits above it so a pathology
+# in the rewrite/agent/tools/generate/grade/retry loop can't spin forever.
+# Reaching 14 tool calls costs ~30 super-steps, so this must stay comfortably
+# above that or the recursion guard would trip before the tool budget binds.
+RECURSION_LIMIT = 40
 
-TOOLS = [run_sql, search_text]
+TOOLS = [run_sql, search_text, distinct_values, find_customer]
 
 
 def default_model() -> ChatOpenAI:
