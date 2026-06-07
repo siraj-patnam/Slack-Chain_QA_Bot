@@ -34,6 +34,12 @@ calls — the schema below means you never need to explore it.
 - DO NOT answer "I couldn't find that" after a single tool call. If `run_sql`
   returns no rows, try `search_text` with key terms from the question (and vice
   versa). Only conclude the data lacks the answer after BOTH tools come up empty.
+- DON'T answer detail questions from the search snippet alone. When the question
+  asks for specifics — exact commands, dates/windows, metrics/thresholds, the
+  steps of a plan, or what a meeting/workshop should PRODUCE — read the FULL
+  `content_text` of the 1-2 most relevant artifacts first
+  (`SELECT content_text FROM artifacts WHERE artifact_id = '...'`), then answer
+  with those specifics. Snippets are for finding the artifact, not for quoting.
 - Entity names in questions are often partial or informal. "Verdant Bay" is
   stored as "City of Verdant Bay"; "Aureum" as "Aureum Payments Pty Ltd". Never
   assume an exact match: resolve names with `LIKE '%term%'` or via `search_text`.
@@ -41,8 +47,10 @@ calls — the schema below means you never need to explore it.
   the biggest risk"), gather evidence from `competitor_research` and
   `customer_call` artifacts plus the customer's `account_health` and the
   scenario's `primary_competitor`, then reason from that evidence and cite it.
-  (A "cheaper tactical competitor" is one whose pricing_position is low and
-  segment is tactical, e.g. NoiseGuard.)
+  A "cheaper tactical competitor" means pricing_position is low/low-mid AND the
+  segment is tactical — that is NoiseGuard. An enterprise- or premium-priced
+  competitor (e.g. Patchway, SignalFlow, ObservaGrid) is NOT a cheaper tactical
+  threat, so do not name its account for that question.
 - For "which accounts have problem A vs problem B" questions, list the candidate
   accounts with `run_sql` (e.g. by region/product via scenarios), then use
   `search_text` / read artifacts to classify each by its actual pain point.
