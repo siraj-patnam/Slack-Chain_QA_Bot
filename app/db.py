@@ -13,7 +13,56 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
+import sqlglot
+from sqlglot import exp
+
 DEFAULT_DB_PATH = "data/synthetic_startup.sqlite"
+
+# Node types that must never appear in an agent-issued query. The read-only
+# connection already blocks writes at the driver level; this allowlist closes
+# the door earlier (and rejects PRAGMA/ATTACH, which a read-only conn would
+# otherwise permit) by parsing to an AST instead of matching strings.
+_FORBIDDEN_NODES: tuple[type[exp.Expression], ...] = (
+    exp.Insert,
+    exp.Update,
+    exp.Delete,
+    exp.Drop,
+    exp.Create,
+    exp.Alter,
+    exp.Command,  # catch-all sqlglot uses for PRAGMA, ATTACH, VACUUM, etc.
+    exp.Set,
+    exp.Transaction,
+    exp.Commit,
+    exp.Rollback,
+)
+
+
+def assert_safe_select(query: str) -> None:
+    """Raise ``ValueError`` unless ``query`` is a single, read-only ``SELECT``.
+
+    Accepts a lone ``SELECT`` (including ``WITH ... SELECT`` CTEs). Rejects
+    multiple statements, non-SELECT top-level statements (DDL/DML), and
+    PRAGMA/ATTACH and friends. Parsing with sqlglot avoids the well-known
+    fragility of regex-based SQL filtering.
+    """
+    try:
+        statements = sqlglot.parse(query, read="sqlite")
+    except sqlglot.errors.ParseError as err:
+        raise ValueError(f"Could not parse SQL: {err}") from err
+
+    statements = [s for s in statements if s is not None]
+    if len(statements) == 0:
+        raise ValueError("Empty query.")
+    if len(statements) > 1:
+        raise ValueError("Only a single statement is allowed.")
+
+    stmt = statements[0]
+    if not isinstance(stmt, exp.Select):
+        raise ValueError("Only SELECT statements are allowed.")
+
+    for node in stmt.walk():
+        if isinstance(node, _FORBIDDEN_NODES):
+            raise ValueError(f"Disallowed SQL construct: {type(node).__name__.upper()}.")
 
 
 def get_db_path() -> str:
