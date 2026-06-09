@@ -12,6 +12,7 @@ Mode, so the signature verification is real, on the request path, and graded.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import threading
@@ -29,8 +30,11 @@ from app.slack_verify import verify_slack_signature
 
 _MENTION_RE = re.compile(r"<@[A-Z0-9]+>")
 PLACEHOLDER = "\U0001f50d Looking into that…"
+ERROR_NOTICE = "⚠️ Sorry — I hit an error answering that. Please try again."
 PROGRESS_THROTTLE_S = 1.0  # courtesy spacing for chat.update rate limits
 DEDUP_TTL_S = 600
+
+logger = logging.getLogger(__name__)
 
 
 def clean_text(text: str) -> str:
@@ -119,21 +123,32 @@ def create_app(
             channel=channel, thread_ts=thread_ts, text=PLACEHOLDER
         )
         msg_ts = placeholder["ts"]
-        last_update = 0.0
-        answer = "Sorry, something went wrong answering that."
-        for item in stream_run(agent, question, thread_id=thread_key(event)):
-            if isinstance(item, AgentProgress):
-                now = time.monotonic()
-                if now - last_update >= PROGRESS_THROTTLE_S:
-                    last_update = now
-                    client.chat_update(
-                        channel=channel,
-                        ts=msg_ts,
-                        text=f"\U0001f50d Searching… ({item.tool_calls} lookups)",
-                    )
-            else:
-                answer = item.answer
-        client.chat_update(channel=channel, ts=msg_ts, text=answer)
+        try:
+            last_update = 0.0
+            answer = "Sorry, something went wrong answering that."
+            for item in stream_run(agent, question, thread_id=thread_key(event)):
+                if isinstance(item, AgentProgress):
+                    now = time.monotonic()
+                    if now - last_update >= PROGRESS_THROTTLE_S:
+                        last_update = now
+                        client.chat_update(
+                            channel=channel,
+                            ts=msg_ts,
+                            text=f"\U0001f50d Searching… ({item.tool_calls} lookups)",
+                        )
+                else:
+                    answer = item.answer
+            client.chat_update(channel=channel, ts=msg_ts, text=answer)
+        except Exception:
+            # Never leave the placeholder hanging. An unhandled error mid-run (an LLM
+            # 5xx, a tool raising) would otherwise kill this background thread
+            # silently and the "Looking into that…" message would sit forever. Log
+            # the traceback and replace the placeholder with a friendly notice.
+            logger.exception("failed to answer thread=%s", thread_key(event))
+            try:
+                client.chat_update(channel=channel, ts=msg_ts, text=ERROR_NOTICE)
+            except Exception:
+                logger.exception("failed to update placeholder with the error notice")
 
     @api.post("/slack/events")
     async def slack_events(request: Request) -> Response:

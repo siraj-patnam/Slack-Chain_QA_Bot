@@ -157,6 +157,35 @@ def test_app_mention_is_answered_in_thread(
     assert final[1]["text"] == "Answer to: what is the patch window?"
 
 
+def test_midrun_error_updates_placeholder_instead_of_hanging(
+    fake_client: FakeSlackClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # An unhandled error mid-run must replace the "Looking into that…" placeholder
+    # with a friendly notice, never leave it hanging or kill the request.
+    def _boom(agent, question, thread_id="cli"):
+        yield AgentProgress(1, ["run_sql"])
+        raise RuntimeError("LLM 500")
+
+    monkeypatch.setattr(slack_app.threading, "Thread", _InlineThread)
+    monkeypatch.setattr(slack_app, "stream_run", _boom)
+    monkeypatch.setattr(slack_app.time, "time", lambda: 10000.0)
+    api = create_app(agent=object(), client=fake_client, signing_secret=SECRET, bot_user_id="UBOT")
+    client = TestClient(api)
+
+    event = {
+        "type": "app_mention",
+        "user": "UHUMAN",
+        "channel": "C1",
+        "ts": "9.9",
+        "text": "<@UBOT> what is the patch window?",
+    }
+    resp = _post(client, {"type": "event_callback", "event_id": "EvErr", "event": event})
+    assert resp.status_code == 200  # the request still acks cleanly
+    final = fake_client.calls[-1]
+    assert final[0] == "update"
+    assert final[1]["text"] == slack_app.ERROR_NOTICE  # placeholder replaced, not hung
+
+
 def test_self_message_is_ignored(app_client: TestClient, fake_client: FakeSlackClient) -> None:
     event = {"type": "app_mention", "user": "UBOT", "channel": "C1", "ts": "9.9", "text": "hi"}
     resp = _post(app_client, {"type": "event_callback", "event_id": "Ev2", "event": event})
