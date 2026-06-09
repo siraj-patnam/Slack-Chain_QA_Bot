@@ -1,8 +1,29 @@
 # Slack Q&A Bot
 
-A Slack bot that answers natural-language questions grounded in a SQLite knowledge base
-(customer calls, product details, implementation notes, internal comms, competitor
-research). Built on **LangGraph** with a hybrid SQL + FTS5 retrieval layer.
+A Slack bot that answers natural-language questions grounded in a company SQLite
+knowledge base (customer calls, support tickets, internal docs and comms,
+competitor research). Built on **LangGraph**: a custom `StateGraph` plans its own
+retrieval over a hybrid SQL + full-text layer, grounds every answer strictly in
+the data, and replies in-thread with live progress.
+
+## Features
+
+- **Retrieval-planning agent.** A custom `StateGraph` decides for itself which
+  tools to call (the prebuilt ReAct agent stays available behind `USE_GRAPH=false`
+  as a fallback). `rewrite` resolves follow-ups against thread history; `agent` /
+  `tools` is the ReAct loop under a tool-call budget; `generate` grounds the
+  answer in the full content of retrieved artifacts; `grade` is a typed
+  groundedness/completeness check that can trigger one self-correction.
+- **Explore-then-commit retrieval.** Instead of guessing values from the schema,
+  the agent discovers them: `distinct_values` lists a column's real categories and
+  `find_customer` fuzzily resolves a customer name *before* it filters. `run_sql`
+  reads full document text; `search_text` (FTS5) is the topic-search fallback.
+  Every artifact is attributed to its owning customer by foreign key, never by a
+  name read out of the prose.
+- **Grounded and cited.** Answers are built strictly from retrieved evidence with
+  artifact-id / table citations — or an honest "I couldn't find that in the data."
+- **Persistent memory.** Multi-turn thread state is checkpointed to SQLite
+  (`SqliteSaver`), so a conversation survives a process restart.
 
 ## Quick start
 
@@ -11,24 +32,35 @@ research). Built on **LangGraph** with a hybrid SQL + FTS5 retrieval layer.
 uv sync
 
 # 2. Configure secrets
-cp .env.example .env   # then fill in OPENAI_API_KEY, SLACK_* tokens
+cp .env.example .env   # fill in OPENAI_API_KEY, SLACK_BOT_TOKEN, SLACK_SIGNING_SECRET
 
-# 3. Add the knowledge-base DB (gitignored)
-#    Download synthetic_startup.sqlite and place it at data/synthetic_startup.sqlite
+# 3. Add the knowledge-base DB (gitignored) at data/synthetic_startup.sqlite
 
 # 4. Run the checks
 make check
 
-# 5. Run the bot locally (Slack Events API webhook on :3000)
+# 5. Ask a question from the CLI (no Slack needed)
+python -m app.ask "what region is BlueHarbor Logistics in?"
+
+# 6. Run the Slack bot (Events API webhook on :3000)
 python -m app.slack_app
 ```
 
-### Run with Docker
+For Slack, expose `:3000` publicly (e.g. `cloudflared tunnel --url http://localhost:3000`)
+and set the app's **Event Subscriptions → Request URL** to `https://<host>/slack/events`,
+subscribing to `app_mention` and `message.im`.
+
+## Run with Docker
 
 ```bash
 docker build -t slack-qa-bot .
-# Mount the data dir (knowledge base + checkpoints) and pass secrets via .env:
+
+# Slack bot (default command — Events API webhook on :3000)
 docker run --rm -p 3000:3000 --env-file .env -v "$PWD/data:/app/data" slack-qa-bot
+
+# Or run the CLI in the same image (override the default command)
+docker run --rm --env-file .env -v "$PWD/data:/app/data" slack-qa-bot \
+  python -m app.ask "what region is BlueHarbor Logistics in?"
 ```
 
 ## Development
@@ -41,56 +73,8 @@ docker run --rm -p 3000:3000 --env-file .env -v "$PWD/data:/app/data" slack-qa-b
 | `make check` | all of the above (the green/red gate) |
 | `make eval`  | run the golden eval as a LangSmith experiment + regression gate |
 
-## Evaluation
-
-`make eval` runs the golden set (the example queries + authored cases + an
-honest-refusal case) as a **LangSmith experiment**: each case is scored with an
-`openevals` correctness judge (prose) or substring/refusal checks (structured),
-plus a per-case tool-call budget. Every run is traced to LangSmith, and a
-committed baseline (`evals/baseline.json`, documented in `evals/BASELINE.md`)
-fails the build on any accuracy or tool-call regression.
-
-Current baseline (prebuilt agent, gpt-4o):
-
-| Metric | Value |
-|---|---|
-| Accuracy | 58.3% (7/12) |
-| Total tool calls | 59 |
-
-Runs require `OPENAI_API_KEY` and `LANGSMITH_API_KEY`; the experiment URL is
-printed at the end of each run for the traces and per-case feedback.
-
-## Memory & self-correction
-
-Multi-turn thread memory is checkpointed to SQLite (`SqliteSaver` at
-`data/checkpoints.sqlite`, overridable via `CHECKPOINT_DB_PATH`), so a thread's
-history survives a process restart. `PostgresSaver` is the drop-in production
-swap — same interface. Tests keep an in-memory checkpointer, so they stay
-hermetic; only the production entry point (`build_default`) persists.
-
-Bounded SQL self-correction is deliberately *not* a dedicated node. `run_sql`
-returns errors as observations rather than raising, so the agent fixes its own
-query inside the ReAct loop; the tool-call budget bounds how many times it can
-retry; and the `grade` node adds a higher-level groundedness/completeness retry.
-A bespoke retry-then-fallback node would duplicate the agent loop and reintroduce
-the brittle hand-routing the graph exists to avoid.
-
-## Layout
-
-```
-app/      # bot, agent, tools, db, prompt
-evals/    # eval harness
-tests/    # unit tests
-```
-
 ## CI & branch protection
 
-CI (`.github/workflows/ci.yml`) runs `make check` on every PR to `main` and on
-pushes to `main`. `main` is protected:
-
-- Require the **CI / check** status check to pass before merging.
-- Require branches to be up to date before merging.
-- Disallow direct pushes to `main` (work on feature branches → PR → squash-merge).
-
-CI also runs `make eval` as a regression gate (see `evals/BASELINE.md`).
-
+CI (`.github/workflows/ci.yml`) runs `make check` on every PR and push to `main`,
+plus `make eval` as a regression gate on PRs. `main` is protected: required CI
+pass, up-to-date branches, no direct pushes (feature branch → PR → squash-merge).
