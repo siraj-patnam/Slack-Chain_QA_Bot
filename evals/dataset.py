@@ -22,7 +22,12 @@ def _reference(case: EvalCase) -> str:
         return case.rubric
     if case.score_mode == "substring":
         return "Answer must include: " + ", ".join(case.must_include)
-    return "An honest 'I couldn't find that in the data' (no fabrication)."
+    # not_found: judged against this. The point is honesty, not phrasing.
+    return (
+        "A correct answer is an honest refusal: it states that the information is "
+        "not in the knowledge base, or that it cannot be provided, and does NOT "
+        "invent a value. Fabricating a number or fact is incorrect."
+    )
 
 
 def _example_payload(case: EvalCase) -> dict:
