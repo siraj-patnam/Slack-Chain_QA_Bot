@@ -34,7 +34,7 @@ from openevals.prompts import CORRECTNESS_PROMPT
 
 from app.agent import ask, build_default
 from evals.dataset import ensure_dataset
-from evals.scoring import check_substrings, is_not_found
+from evals.scoring import check_substrings
 
 BASELINE_PATH = Path(__file__).parent / "baseline.json"
 
@@ -82,9 +82,11 @@ def _make_correctness_evaluator():
         mode = reference_outputs["score_mode"]
         if mode == "substring":
             ok = check_substrings(answer, reference_outputs["must_include"])
-        elif mode == "not_found":
-            ok = is_not_found(answer)
-        else:  # judge: deterministic anchor must hold, then the LLM judge
+        else:
+            # Both prose ("judge") and honest-refusal ("not_found") cases are scored
+            # by the LLM judge against the case reference. A deterministic substring
+            # anchor (the must_include list, empty for refusal cases) gates it first,
+            # so the judge can't pass an answer that's missing a required fact.
             anchor = check_substrings(answer, reference_outputs.get("must_include") or [])
             verdict = judge(
                 inputs=inputs["question"],
