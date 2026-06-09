@@ -96,12 +96,44 @@ EXAMPLE_CASES = [
             "is that milestone?"
         ),
         max_tool_calls=14,
-        must_include=("BlueHarbor",),
+        # NO substring anchor here (unlike the other example cases). This is a
+        # multi-factor RANKING-JUDGMENT question with more than one defensible
+        # answer, so hardcoding a single customer name (the old
+        # must_include=("BlueHarbor",)) auto-failed an equally-correct answer
+        # before the judge ever ran. The data backs this up: the "cheaper tactical
+        # competitor" is NoiseGuard, and exactly TWO accounts are BOTH 'at risk'
+        # AND facing NoiseGuard — BlueHarbor Logistics (the original gold) and
+        # Pioneer Freight Solutions, which is actually running a LIVE tactical
+        # NoiseGuard PoC. Live agent runs name each of them (plus the occasional
+        # genuine miss). So we drop the anchor and let the judge score the
+        # REASONING: did it pick an at-risk NoiseGuard account and give that
+        # account's real milestone — not whether it echoed one memorized name.
         rubric=(
-            "Names BlueHarbor Logistics as most likely to defect to a cheaper "
-            "tactical competitor (NoiseGuard), and describes the next milestone "
-            "as the 7-10 business day proof-of-fix for search relevance with a "
-            "top-5 correct hit rate of at least 80%."
+            "This is a ranking-judgment question: which account is most likely to "
+            "defect to the cheaper, tactical competitor (NoiseGuard — the low-cost "
+            "alert/dedupe option) if the next promised milestone slips, and what "
+            "that milestone is. TWO answers are acceptable, because two 'at risk' "
+            "accounts both face NoiseGuard: BlueHarbor Logistics and Pioneer "
+            "Freight Solutions. Mark the answer CORRECT if it (a) names EITHER "
+            "BlueHarbor Logistics OR Pioneer Freight Solutions as the account at "
+            "risk of defecting, AND (b) gives that account's concrete next "
+            "milestone — the right timeframe and what must be proven, grounded with "
+            "a citation. For BlueHarbor the milestone is the proof-of-fix that "
+            "search relevance is measurably improved within a short window of about "
+            "7-10 business days (its success target is a top-5 correct hit rate of "
+            "~80%); an answer that identifies this proof-of-fix and its ~10-"
+            "business-day window is correct whether or not it quotes the exact 80% "
+            "figure. For Pioneer Freight the milestone is the search-relevance "
+            "remediation gate (schema verification around 2026-03-22 within a "
+            "~6-week recovery, acceptance e.g. precision@10 >= 0.8). Naming "
+            "NoiseGuard explicitly STRENGTHENS the answer but is NOT required — "
+            "both accounts' competitor is "
+            "NoiseGuard, so naming the account already implies it; likewise the "
+            "exact metric threshold is a bonus, not required. Mark the answer "
+            "INCORRECT if it names any OTHER account (e.g. NordFryst, HelioFab, "
+            "Pioneer Grid Retail), if it attributes the threat to a competitor that "
+            "is not a cheap tactical dedupe option (e.g. Patchway, an enterprise "
+            "orchestration tool), or if it gives no concrete milestone."
         ),
     ),
     EvalCase(

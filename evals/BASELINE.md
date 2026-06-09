@@ -16,7 +16,8 @@ aggregate tool-call count is ratcheted against `baseline.json`.
 | Prebuilt `create_agent` (`USE_GRAPH=false`), same tools | 93.75% (15/16) | 100% (4/4) | 30 |
 
 Numbers vary a few points run to run (a temperature-0 LLM agent is still not
-fully deterministic); the floors absorb that.
+fully deterministic); the floors absorb that. These figures predate the `ex5`
+rescore below (the old run's single failure); regenerate with `--sync --update`.
 
 ## Where the improvement came from
 
@@ -40,15 +41,43 @@ graph contributes the parts a real deployment needs — typed routing, an explic
 grounding + self-correction (`grade`) step, a tool-call budget, and follow-up
 handling — at no accuracy cost on the cases we do measure.
 
-## Remaining failure (1/16)
+## ex5 — a deliberately ambiguous ranking case (rescored)
 
 `ex5` ("which customer is most likely to defect to a cheaper tactical
-competitor"). It is a multi-factor ranking question with a debatable gold answer
-(BlueHarbor): the agent names a *different* account run to run (Pioneer Grid
-Retail, NordFryst), none matching the gold. Part ambiguous gold (an account
-running a live competitor PoC is a defensible answer), part the agent not
-converging on the strongest signal. A ranking-judgment weakness, not a retrieval
-or grounding miss.
+competitor") was the long-standing 1/16 failure. Investigation showed it is not a
+retrieval or grounding bug but a **multi-factor ranking question with more than
+one defensible answer**, made unwinnable by a hardcoded gold:
+
+- The "cheaper tactical competitor" is **NoiseGuard** (low-cost alert/dedupe). Of
+  the six accounts that face NoiseGuard, exactly **two are `account_health = 'at
+  risk'`**: **BlueHarbor Logistics** (the original gold) and **Pioneer Freight
+  Solutions** — which is actually running a **live tactical NoiseGuard PoC** and
+  says it will "extend NoiseGuard and reduce Northstar scope" if the 6-week
+  remediation slips. Pioneer is at least as defensible as BlueHarbor.
+- The one artifact that tips the call to BlueHarbor (its renewal call, where the
+  customer muses about taking NoiseGuard as a cheap stopgap) contains **none** of
+  the question's discriminating words ("defect" appears 0× in the whole corpus;
+  the call says "cheap", the question says "cheaper" — different terms under
+  FTS5's stemless match). Keyword search on the question buries that call at rank
+  ~33–109 behind six near-identical "Competitor report: NoiseGuard" templates, so
+  the agent sometimes answers from the wrong artifact (e.g. NordFryst's "Renewal
+  Risk" doc → defect to *Patchway*, the wrong, enterprise-priced competitor).
+
+Live agent runs bear this out: across sampled runs it names BlueHarbor, Pioneer
+Freight, and the occasional genuine miss (NordFryst/Patchway).
+
+**Rescoring (this change).** The old gold hardcoded `must_include=("BlueHarbor",)`,
+which auto-failed an equally-correct Pioneer answer *before the judge ran*. We
+removed that anchor and rewrote the rubric to score the **reasoning**: a correct
+answer names **either** BlueHarbor **or** Pioneer Freight and gives that account's
+real milestone; it is still marked wrong for naming a different account, a wrong
+competitor (e.g. Patchway), or no milestone. Verified offline against four live
+ex5 answers — the two BlueHarbor and the Pioneer answers pass; the
+NordFryst→Patchway miss fails.
+
+> **Re-sync required.** The LangSmith dataset caches the reference, so this rubric
+> change only takes effect after `python -m evals.run --sync --update`, which also
+> re-baselines `total_tool_calls`. The "Current numbers" above predate the rescore.
 
 ## Methodology notes
 
