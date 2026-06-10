@@ -18,6 +18,7 @@ from langchain_core.callbacks import CallbackManagerForLLMRun
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, BaseMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
+from pydantic import Field
 
 
 class FakeToolCallingModel(BaseChatModel):
@@ -25,11 +26,14 @@ class FakeToolCallingModel(BaseChatModel):
 
     Supports ``bind_tools`` (a no-op returning itself) so it can stand in for a
     tool-calling model inside ``create_agent``. Each invocation returns the next
-    scripted message, letting a test choreograph a deterministic tool-call loop.
+    scripted message, letting a test choreograph a deterministic tool-call loop;
+    every input is recorded in ``calls`` so a test can also assert what the
+    model actually SAW (e.g. that history bounding dropped old tool traffic).
     """
 
     responses: list[AIMessage]
     index: int = 0
+    calls: list[list[BaseMessage]] = Field(default_factory=list)
 
     @property
     def _llm_type(self) -> str:
@@ -42,6 +46,7 @@ class FakeToolCallingModel(BaseChatModel):
         run_manager: CallbackManagerForLLMRun | None = None,
         **kwargs: Any,
     ) -> ChatResult:
+        self.calls.append(list(messages))
         message = self.responses[self.index]
         self.index += 1
         return ChatResult(generations=[ChatGeneration(message=message)])

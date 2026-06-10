@@ -9,7 +9,16 @@ import pytest
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from app.agent import BUDGET_STOP_NOTE, ask, default_checkpointer
-from app.graph import AnswerGrade, _route_after_agent, _route_after_grade, build_graph
+from app.graph import (
+    GENERATE_PROMPT,
+    MAX_HISTORY_MESSAGES,
+    REVIEWER_NAME,
+    AnswerGrade,
+    _history_skeleton,
+    _route_after_agent,
+    _route_after_grade,
+    build_graph,
+)
 
 
 def _tool_call(name: str, query: str, call_id: str) -> AIMessage:
@@ -40,6 +49,25 @@ def test_route_after_agent() -> None:
 def test_route_after_grade() -> None:
     assert _route_after_grade({"messages": [HumanMessage(content="feedback")]}) == "agent"
     assert _route_after_grade({"messages": [AIMessage(content="answer")]}) == "end"
+
+
+def test_history_skeleton_keeps_capped_qa_only() -> None:
+    # Each old turn collapses to its Q and final A: tool traffic and reviewer
+    # feedback drop out, and the cap keeps only the most recent messages.
+    messages: list = []
+    for i in range(10):
+        messages.append(HumanMessage(content=f"q{i}"))
+        messages.append(_tool_call("run_sql", f"SELECT {i}", f"c{i}"))
+        messages.append(ToolMessage(content="rows", tool_call_id=f"c{i}", name="run_sql"))
+        messages.append(HumanMessage(content="reviewer feedback", name=REVIEWER_NAME))
+        messages.append(AIMessage(content=f"a{i}"))
+    skeleton = _history_skeleton(messages, len(messages))
+    assert len(skeleton) == MAX_HISTORY_MESSAGES
+    assert [m.content for m in skeleton][-2:] == ["q9", "a9"]  # most recent kept
+    assert "q0" not in [m.content for m in skeleton]  # oldest dropped by the cap
+    assert not any(isinstance(m, ToolMessage) for m in skeleton)
+    assert not any(isinstance(m, AIMessage) and m.tool_calls for m in skeleton)
+    assert not any(getattr(m, "name", None) == REVIEWER_NAME for m in skeleton)
 
 
 # --- graph behavior ---------------------------------------------------------
@@ -221,6 +249,88 @@ def test_retries_reset_per_turn(
     second = ask(graph, "a follow-up?", thread_id="retries")
     # Stale retries would accept "Draft 4." without consulting the grader.
     assert second.answer == "Final answer."
+
+
+@pytest.mark.usefixtures("seeded_db")
+def test_agent_view_drops_prior_turn_tool_traffic(
+    fake_model: Callable[[list[AIMessage]], object],
+    fake_grader: Callable[[list[object]], object],
+) -> None:
+    # Turn 2's model input must contain turn 1's question and answer but NONE
+    # of its tool traffic — replaying old tool dumps verbatim grew the prompt
+    # without bound on long threads.
+    main = fake_model(
+        [
+            _tool_call("run_sql", "SELECT 1", "c1"),
+            AIMessage(content="First answer."),
+            AIMessage(content="Standalone follow-up?"),  # rewrite, turn 2
+            AIMessage(content="Second answer."),
+        ]
+    )
+    grader = fake_grader(
+        [
+            AnswerGrade(grounded=True, complete=True, feedback=""),
+            AnswerGrade(grounded=True, complete=True, feedback=""),
+        ]
+    )
+    graph = build_graph(model=main, grader=grader)
+    ask(graph, "first question", thread_id="bounded")
+    second = ask(graph, "a follow-up", thread_id="bounded")
+    assert second.answer == "Second answer."
+
+    # The last agent call (its input leads with the schema system prompt).
+    agent_inputs = [
+        c
+        for c in main.calls
+        if "Northstar" in str(c[0].content)  # type: ignore[attr-defined]
+    ]
+    view = agent_inputs[-1]
+    contents = [str(m.content) for m in view]
+    assert "first question" in contents  # prior turn's Q kept
+    assert "First answer." in contents  # prior turn's final A kept
+    assert "Standalone follow-up?" in contents  # this turn's question
+    assert not any(isinstance(m, ToolMessage) for m in view)
+    assert not any(isinstance(m, AIMessage) and m.tool_calls for m in view)
+
+
+@pytest.mark.usefixtures("seeded_db")
+def test_generate_evidence_scoped_to_current_turn(
+    fake_model: Callable[[list[AIMessage]], object],
+    fake_grader: Callable[[list[object]], object],
+) -> None:
+    # Turn 1 retrieves artifact a1; turn 2 retrieves a2. Turn 2's grounding
+    # synthesis must see a2 only — turn 1's artifact must not ride along into
+    # the current answer's evidence.
+    main = fake_model(
+        [
+            _tool_call("search_text", "taxonomy proof renewal", "c1"),
+            AIMessage(content="Turn one draft."),
+            AIMessage(content="Grounded answer one."),  # generate synthesis, t1
+            AIMessage(content="Standalone: patch window rollback?"),  # rewrite, t2
+            _tool_call("search_text", "patch window rollback", "c2"),
+            AIMessage(content="Turn two draft."),
+            AIMessage(content="Grounded answer two."),  # generate synthesis, t2
+        ]
+    )
+    grader = fake_grader(
+        [
+            AnswerGrade(grounded=True, complete=True, feedback=""),
+            AnswerGrade(grounded=True, complete=True, feedback=""),
+        ]
+    )
+    graph = build_graph(model=main, grader=grader)
+    ask(graph, "what proof plan for the taxonomy issue?", thread_id="ev")
+    second = ask(graph, "and the patch window?", thread_id="ev")
+    assert second.answer == "Grounded answer two."
+
+    generate_inputs = [
+        c
+        for c in main.calls
+        if str(c[0].content) == GENERATE_PROMPT  # type: ignore[attr-defined]
+    ]
+    evidence = str(generate_inputs[-1][1].content)
+    assert "art_0000000000a2" in evidence  # this turn's artifact grounds it
+    assert "art_0000000000a1" not in evidence  # prior turn's artifact does not
 
 
 @pytest.mark.usefixtures("seeded_db")

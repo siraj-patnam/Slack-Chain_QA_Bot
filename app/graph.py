@@ -17,6 +17,11 @@ This keeps every routing/grading decision typed (no string-matching, no regex),
 and the enumerate-vs-detail distinction dissolves: generate answers from
 whatever evidence exists, and grade catches under-retrieval generically. The
 prebuilt create_agent path stays available behind the USE_GRAPH flag.
+
+Thread context is BOUNDED: prior turns are replayed to the model only as a
+capped Q/A skeleton (questions + final answers, no old tool traffic), and each
+turn's evidence, tool budget, and retries are scoped to that turn — so a long
+Slack thread cannot grow the prompt without bound or starve later turns.
 """
 
 from __future__ import annotations
@@ -45,6 +50,12 @@ MAX_RETRIES = 2
 # count of executed tool calls, NOT graph super-steps — the RECURSION_LIMIT in
 # app.agent is only a coarse runaway guard sitting above this.
 TOOL_CALL_LIMIT = 14
+# Prior turns are replayed to the model as a Q/A skeleton capped to this many
+# messages (~6 exchanges), so the prompt stays bounded on long threads.
+MAX_HISTORY_MESSAGES = 12
+# grade's retry-feedback messages carry this name, so history bounding can tell
+# them apart from real user turns.
+REVIEWER_NAME = "reviewer"
 _EVIDENCE_MAX_EACH = 2000
 _EVIDENCE_MAX_TOTAL = 9000
 _ID_RE = re.compile(r"art_[0-9a-f]{6,}")
@@ -69,11 +80,18 @@ class QAState(MessagesState):
     "budget reached" on its first tool call). ``retries`` is reset at the same
     point for the same reason. Both are stamped by ``rewrite``, which runs
     exactly once per turn.
+
+    ``turn_msg_start`` is the message index where this turn begins (its user
+    question). ``agent`` replays everything before it only as a capped Q/A
+    skeleton, and generate/grade scope their evidence to messages from this
+    index on — prior turns' tool results must not bleed into the current
+    answer's grounding.
     """
 
     retries: int
     question: str
     turn_tool_start: int
+    turn_msg_start: int
 
 
 class AnswerGrade(BaseModel):
@@ -131,6 +149,27 @@ GRADE_PROMPT = (
     "the entity's artifacts were never listed or read), mark it incomplete and "
     "say in the feedback exactly what to retrieve next."
 )
+
+
+def _history_skeleton(messages: list, end: int) -> list:
+    """Prior turns condensed to their conversational skeleton, capped.
+
+    Keeps only the user's questions and the bot's final answers from
+    ``messages[:end]``. Prior turns' tool traffic (tool-calling AIMessages and
+    their ToolMessages) is the bulk of a thread's tokens and is never needed
+    again — whatever it proved already lives in the kept answers; dropping the
+    pairs together also keeps the view valid for the model API (no tool_calls
+    stub without its response). Reviewer-feedback messages from grade retries
+    are dropped too. Capped to the most recent MAX_HISTORY_MESSAGES so the
+    replayed history stays bounded no matter how long the thread runs.
+    """
+    skeleton = [
+        m
+        for m in messages[:end]
+        if (isinstance(m, HumanMessage) and m.content and m.name != REVIEWER_NAME)
+        or (isinstance(m, AIMessage) and m.content and not m.tool_calls)
+    ]
+    return skeleton[-MAX_HISTORY_MESSAGES:]
 
 
 def _tool_results(messages: list) -> str:
@@ -299,6 +338,8 @@ def build_graph(
         # earlier turns would permanently consume later turns' budget/retries.
         turn_start = {
             "turn_tool_start": _tool_call_count(messages),
+            # This turn's question is the message just appended by the caller.
+            "turn_msg_start": max(len(messages) - 1, 0),
             "retries": 0,
         }
         humans = [m for m in messages if isinstance(m, HumanMessage)]
@@ -311,8 +352,7 @@ def build_graph(
             return {**turn_start, "question": str(latest.content)}
         context = "\n".join(
             f"{'User' if isinstance(m, HumanMessage) else 'Bot'}: {m.content}"
-            for m in messages
-            if isinstance(m, (HumanMessage, AIMessage)) and m.content and m is not latest
+            for m in _history_skeleton(messages, len(messages) - 1)
         )
         resolved = base.invoke(
             [
@@ -330,18 +370,32 @@ def build_graph(
             "question": standalone,
         }
 
-    def agent(state: MessagesState) -> dict:
-        messages = [SystemMessage(content=SCHEMA_PROMPT), *state["messages"]]
-        return {"messages": [model_with_tools.invoke(messages)]}
+    def agent(state: QAState) -> dict:
+        messages = state["messages"]
+        start = state.get("turn_msg_start", 0)
+        # Bounded context: prior turns as a capped Q/A skeleton, THIS turn in
+        # full (its live tool loop is what the model is reasoning over).
+        # Replaying whole turns verbatim grew the prompt without bound — every
+        # old tool dump rode along on every later call of the thread.
+        view = [
+            SystemMessage(content=SCHEMA_PROMPT),
+            *_history_skeleton(messages, start),
+            *messages[start:],
+        ]
+        return {"messages": [model_with_tools.invoke(view)]}
 
     def generate(state: QAState) -> dict:
         messages = state["messages"]
+        # Evidence is THIS turn's retrieval only: prior turns' tool results and
+        # artifacts must not bleed into the current answer's grounding (their
+        # conclusions already live in the conversation history).
+        turn = messages[state.get("turn_msg_start", 0) :]
         # Close out any tool_calls the budget left dangling, so the SAVED history
         # is valid on the next turn (see _budget_stop_messages).
         stop = _budget_stop_messages(messages)
         last = messages[-1]
         agent_answered = isinstance(last, AIMessage) and bool(last.content) and not last.tool_calls
-        full = _fetch_full_content(_artifact_ids(messages))
+        full = _fetch_full_content(_artifact_ids(turn))
         # When the agent already produced an answer and there is no FULL artifact
         # content to add, keep that answer. Grounding only earns its keep by
         # replacing a search-EXCERPT answer with the complete source; with no
@@ -353,7 +407,7 @@ def build_graph(
         # Otherwise synthesize: either to ground an excerpt answer in full artifact
         # content, or because the tool-call budget stopped the agent before it
         # answered and we must answer from whatever was gathered.
-        tool_evidence = _tool_results(messages)
+        tool_evidence = _tool_results(turn)
         if not tool_evidence and not full:
             return {"messages": stop} if stop else {}
         question = state.get("question") or _last_human_text(messages)
@@ -374,6 +428,9 @@ def build_graph(
         if _budget_reached(state):
             return {}  # tool budget spent — no point asking the agent to retrieve more
         messages = state["messages"]
+        # Same turn scoping as generate: grade judges THIS turn's answer
+        # against THIS turn's evidence.
+        turn = messages[state.get("turn_msg_start", 0) :]
         question = state.get("question") or _last_human_text(messages)
         result = cast(
             AnswerGrade,
@@ -385,8 +442,8 @@ def build_graph(
                             f"QUESTION:\n{question}\n\n"
                             f"TOOL BUDGET: {_turn_tool_calls(state)} of "
                             f"{TOOL_CALL_LIMIT} calls used\n\n"
-                            f"EVIDENCE:\n{_tool_results(messages) or '(none)'}\n\n"
-                            f"ANSWER:\n{_last_ai_text(messages)}"
+                            f"EVIDENCE:\n{_tool_results(turn) or '(none)'}\n\n"
+                            f"ANSWER:\n{_last_ai_text(turn)}"
                         )
                     ),
                 ]
@@ -398,7 +455,8 @@ def build_graph(
             "messages": [
                 HumanMessage(
                     content=f"A reviewer flagged the previous answer: {result.feedback} "
-                    "Retrieve what you still need and answer again."
+                    "Retrieve what you still need and answer again.",
+                    name=REVIEWER_NAME,
                 )
             ],
             "retries": state.get("retries", 0) + 1,
