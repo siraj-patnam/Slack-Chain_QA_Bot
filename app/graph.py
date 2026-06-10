@@ -51,7 +51,13 @@ MAX_RETRIES = 2
 # app.agent is only a coarse runaway guard sitting above this.
 TOOL_CALL_LIMIT = 14
 # Prior turns are replayed to the model as a Q/A skeleton capped to this many
-# messages (~6 exchanges), so the prompt stays bounded on long threads.
+# messages (~6 exchanges), so the prompt stays bounded on long threads. The cap
+# is by COUNT and keeps final answers verbatim — on this bot those are the
+# largest messages (set/enumeration answers run ~1-2k tokens), so the skeleton's
+# ceiling sits around 10-15k tokens: O(1) in thread length, deliberately a loose
+# constant. If token cost becomes the binding concern, the next lever is a token
+# budget on the skeleton, or summarizing older turns instead of replaying their
+# answers verbatim.
 MAX_HISTORY_MESSAGES = 12
 # grade's retry-feedback messages carry this name, so history bounding can tell
 # them apart from real user turns.
