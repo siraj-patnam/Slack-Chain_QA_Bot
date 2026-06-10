@@ -34,7 +34,7 @@ from langgraph.graph.state import CompiledStateGraph
 from langgraph.prebuilt import ToolNode
 from pydantic import BaseModel, Field
 
-from app.agent import TOOLS, default_model
+from app.agent import BUDGET_STOP_NOTE, TOOLS, default_model
 from app.db import readonly_connection
 from app.prompt import SCHEMA_PROMPT
 
@@ -61,10 +61,19 @@ class QAState(MessagesState):
     last HumanMessage: a retry appends a reviewer-feedback HumanMessage, so
     "last human message" would silently become the feedback string instead of the
     user's actual question.
+
+    ``turn_tool_start`` is the executed-tool-call count at the START of this
+    turn. The checkpointer accumulates messages across a thread's turns, so the
+    budget must measure only THIS turn's spend — counting the whole history
+    would let earlier turns starve later ones (a long Slack thread would hit
+    "budget reached" on its first tool call). ``retries`` is reset at the same
+    point for the same reason. Both are stamped by ``rewrite``, which runs
+    exactly once per turn.
     """
 
     retries: int
     question: str
+    turn_tool_start: int
 
 
 class AnswerGrade(BaseModel):
@@ -114,22 +123,36 @@ GRADE_PROMPT = (
     "should have retrieved first).\n"
     "- If a set of accounts/items was requested, it is complete only if every "
     "member present in the evidence is listed.\n"
-    "- An honest 'I couldn't find that in the data' is grounded and complete."
+    "- An honest 'I couldn't find that in the data' is grounded. But it is "
+    "COMPLETE only if the evidence shows retrieval for that specific thing was "
+    "genuinely exhausted — queries or searches aimed at it coming back empty. If "
+    "a PART of the question is met with 'couldn't find' while most of the tool "
+    "budget is unused and the evidence shows no real attempt at that part (e.g. "
+    "the entity's artifacts were never listed or read), mark it incomplete and "
+    "say in the feedback exactly what to retrieve next."
 )
 
 
 def _tool_results(messages: list) -> str:
-    """The agent's tool outputs (SQL rows, search hits, fetched content) as evidence."""
+    """The agent's tool outputs (SQL rows, search hits, fetched content) as evidence.
+
+    When the caps bind, evidence keeps the most RECENT tool results (and drops the
+    oldest): retrieval converges toward the answer, so the late results hold the
+    decisive joins and reads while the early ones are exploration. Keeping
+    first-N instead made a budget-stopped run answer from the opening
+    distinct_values dumps and claim the (retrieved, but dropped) facts were
+    never found. Output stays in chronological order.
+    """
     parts: list[str] = []
     total = 0
-    for msg in messages:
+    for msg in reversed(messages):
         if isinstance(msg, ToolMessage):
             text = str(msg.content)[:_EVIDENCE_MAX_EACH]
             parts.append(f"[{msg.name}]\n{text}")
             total += len(text)
             if total >= _EVIDENCE_MAX_TOTAL:
                 break
-    return "\n\n".join(parts)
+    return "\n\n".join(reversed(parts))
 
 
 def _artifact_ids(messages: list) -> list[str]:
@@ -183,8 +206,14 @@ def _last_ai_text(messages: list) -> str:
 
 
 def _tool_call_count(messages: list) -> int:
-    """Number of tool calls executed so far this run (the retrieval budget unit)."""
-    return sum(1 for m in messages if isinstance(m, ToolMessage))
+    """Number of executed tool calls in the message history.
+
+    Synthetic budget-stop messages are excluded: they close out UNexecuted calls
+    in the saved history and must not count as spent retrieval.
+    """
+    return sum(
+        1 for m in messages if isinstance(m, ToolMessage) and str(m.content) != BUDGET_STOP_NOTE
+    )
 
 
 def _budget_stop_messages(messages: list) -> list[ToolMessage]:
@@ -205,7 +234,7 @@ def _budget_stop_messages(messages: list) -> list[ToolMessage]:
         return []
     return [
         ToolMessage(
-            content="Retrieval budget reached; this call was not executed.",
+            content=BUDGET_STOP_NOTE,
             tool_call_id=tc["id"],
             name=tc.get("name", ""),
         )
@@ -213,8 +242,20 @@ def _budget_stop_messages(messages: list) -> list[ToolMessage]:
     ]
 
 
-def _budget_reached(messages: list) -> bool:
-    """The retrieval budget (TOOL_CALL_LIMIT) is spent.
+def _turn_tool_calls(state: QAState) -> int:
+    """Executed tool calls made during THIS turn (the retrieval budget unit).
+
+    The checkpointer accumulates messages across a thread's turns, so the count
+    is taken relative to ``turn_tool_start`` (stamped by ``rewrite`` at the top
+    of every turn). Counting the whole history instead would let earlier turns
+    starve later ones — by turn three of a long Slack thread the budget would
+    already read as spent before the first new tool call.
+    """
+    return _tool_call_count(state["messages"]) - state.get("turn_tool_start", 0)
+
+
+def _budget_reached(state: QAState) -> bool:
+    """This turn's retrieval budget (TOOL_CALL_LIMIT) is spent.
 
     Centralized so the agent-router and the grader stay in lockstep: the router
     stops the tool loop and the grader stops requesting retries at the SAME
@@ -223,13 +264,13 @@ def _budget_reached(messages: list) -> bool:
     requested a retry, that message would be re-sent to the model and the API
     would reject it. Both call this one predicate so the invariant can't drift.
     """
-    return _tool_call_count(messages) >= TOOL_CALL_LIMIT
+    return _turn_tool_calls(state) >= TOOL_CALL_LIMIT
 
 
-def _route_after_agent(state: MessagesState) -> str:
+def _route_after_agent(state: QAState) -> str:
     last = state["messages"][-1]
     if isinstance(last, AIMessage) and last.tool_calls:
-        if _budget_reached(state["messages"]):
+        if _budget_reached(state):
             return "generate"  # budget spent — answer from what was gathered
         return "tools"
     return "generate"
@@ -252,14 +293,22 @@ def build_graph(
 
     def rewrite(state: QAState) -> dict:
         messages = state["messages"]
+        # rewrite runs exactly once per turn, so it is where the per-turn
+        # counters reset: the budget measures from here (turn_tool_start) and
+        # the self-correction retries start fresh. Without this, a thread's
+        # earlier turns would permanently consume later turns' budget/retries.
+        turn_start = {
+            "turn_tool_start": _tool_call_count(messages),
+            "retries": 0,
+        }
         humans = [m for m in messages if isinstance(m, HumanMessage)]
         if not humans:
-            return {}
+            return turn_start
         latest = humans[-1]
         if len(humans) <= 1:
             # First turn: already standalone. Still record it as the turn's
             # question so generate/grade never fall back to scanning messages.
-            return {"question": str(latest.content)}
+            return {**turn_start, "question": str(latest.content)}
         context = "\n".join(
             f"{'User' if isinstance(m, HumanMessage) else 'Bot'}: {m.content}"
             for m in messages
@@ -276,6 +325,7 @@ def build_graph(
         standalone = str(resolved.content)
         # Same id replaces the original human turn via the add_messages reducer.
         return {
+            **turn_start,
             "messages": [HumanMessage(content=standalone, id=latest.id)],
             "question": standalone,
         }
@@ -321,7 +371,7 @@ def build_graph(
     def grade(state: QAState) -> dict:
         if state.get("retries", 0) >= MAX_RETRIES:
             return {}  # retry budget spent — accept the current answer
-        if _budget_reached(state["messages"]):
+        if _budget_reached(state):
             return {}  # tool budget spent — no point asking the agent to retrieve more
         messages = state["messages"]
         question = state.get("question") or _last_human_text(messages)
@@ -333,6 +383,8 @@ def build_graph(
                     HumanMessage(
                         content=(
                             f"QUESTION:\n{question}\n\n"
+                            f"TOOL BUDGET: {_turn_tool_calls(state)} of "
+                            f"{TOOL_CALL_LIMIT} calls used\n\n"
                             f"EVIDENCE:\n{_tool_results(messages) or '(none)'}\n\n"
                             f"ANSWER:\n{_last_ai_text(messages)}"
                         )

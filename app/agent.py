@@ -39,6 +39,18 @@ RECURSION_LIMIT = 40
 
 TOOLS = [run_sql, search_text, distinct_values, find_customer]
 
+# Synthetic ToolMessage content the graph uses to close out tool calls the
+# retrieval budget left unexecuted (see graph._budget_stop_messages). Those
+# messages keep the saved history valid for the next turn, but they are NOT
+# executed retrievals — tool-call accounting must skip them or a budget-stopped
+# run reports more calls than it actually made.
+BUDGET_STOP_NOTE = "Retrieval budget reached; this call was not executed."
+
+
+def _is_executed_tool_message(msg: object) -> bool:
+    return isinstance(msg, ToolMessage) and bool(msg.name) and str(msg.content) != BUDGET_STOP_NOTE
+
+
 # Where multi-turn thread state is persisted. A separate file from the read-only
 # knowledge base; data/ is gitignored.
 DEFAULT_CHECKPOINT_PATH = "data/checkpoints.sqlite"
@@ -130,7 +142,12 @@ def ask(agent: CompiledStateGraph, question: str, thread_id: str = "cli") -> Age
 
     messages = result["messages"]
     answer = messages[-1].content if messages else ""
-    tool_calls = [m.name for m in messages if isinstance(m, ToolMessage) and m.name]
+    executed = [m.name for m in messages if _is_executed_tool_message(m)]
+    # The thread history accumulates across turns; report only THIS turn's
+    # calls. The graph stamps turn_tool_start every turn (the prebuilt agent
+    # has no marker and falls back to the whole history — fine for its
+    # fresh-thread uses, the eval and tests).
+    tool_calls = executed[result.get("turn_tool_start", 0) :]
     return AgentResult(answer=str(answer), tool_calls=tool_calls)
 
 
@@ -163,7 +180,7 @@ def stream_run(
         ):
             for payload in chunk.values():
                 for msg in (payload or {}).get("messages", []):
-                    if isinstance(msg, ToolMessage) and msg.name:
+                    if _is_executed_tool_message(msg):
                         tool_names.append(msg.name)
                         yield AgentProgress(len(tool_names), list(tool_names))
                     elif isinstance(msg, AIMessage) and msg.content:

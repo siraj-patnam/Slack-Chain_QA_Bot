@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
-from app.agent import ask, default_checkpointer
+from app.agent import BUDGET_STOP_NOTE, ask, default_checkpointer
 from app.graph import AnswerGrade, _route_after_agent, _route_after_grade, build_graph
 
 
@@ -138,6 +138,89 @@ def test_budget_cap_leaves_balanced_history(
     )
     _assert_tool_calls_balanced(state["messages"])
     assert state["messages"][-1].content == "Answer from what we gathered."
+
+
+@pytest.mark.usefixtures("seeded_db")
+def test_budget_is_per_turn_not_per_thread(
+    fake_model: Callable[[list[AIMessage]], object],
+    fake_grader: Callable[[list[object]], object],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The checkpointer accumulates messages across turns. The budget must be
+    # measured per TURN: here turn 1 spends the whole budget (2), and turn 2 of
+    # the SAME thread must still get its own fresh 2 — not arrive pre-starved
+    # with its first tool call budget-stopped.
+    monkeypatch.setattr("app.graph.TOOL_CALL_LIMIT", 2)
+    main = fake_model(
+        [
+            # turn 1: spends the full budget, then answers.
+            _tool_call("run_sql", "SELECT 1", "c1"),
+            _tool_call("run_sql", "SELECT 2", "c2"),
+            AIMessage(content="First answer."),
+            # turn 2: rewrite consumes one response, then ONE tool call.
+            AIMessage(content="Standalone follow-up?"),
+            _tool_call("run_sql", "SELECT 3", "c3"),
+            AIMessage(content="Second answer."),
+        ]
+    )
+    # grade short-circuits on the spent budget in turn 1; consulted in turn 2.
+    grader = fake_grader([AnswerGrade(grounded=True, complete=True, feedback="")])
+    graph = build_graph(model=main, grader=grader)
+
+    first = ask(graph, "a question needing many lookups", thread_id="turns")
+    assert first.tool_calls == ["run_sql", "run_sql"]
+
+    second = ask(graph, "and a follow-up?", thread_id="turns")
+    assert second.answer == "Second answer."
+    # The turn's single call EXECUTED (per-turn count 1 of 2) and is reported
+    # turn-scoped — not [] (budget-stopped) and not 3 (whole-thread count).
+    assert second.tool_calls == ["run_sql"]
+    state = graph.get_state({"configurable": {"thread_id": "turns"}})  # type: ignore[arg-type]
+    stop_notes = [
+        m
+        for m in state.values["messages"]
+        if isinstance(m, ToolMessage) and str(m.content) == BUDGET_STOP_NOTE
+    ]
+    assert stop_notes == []
+
+
+@pytest.mark.usefixtures("seeded_db")
+def test_retries_reset_per_turn(
+    fake_model: Callable[[list[AIMessage]], object],
+    fake_grader: Callable[[list[object]], object],
+) -> None:
+    # Same starvation bug as the tool budget, for the grader's retry counter:
+    # turn 1 exhausts MAX_RETRIES (2); on turn 2 grade must be consulted again
+    # and still able to drive a retry, not short-circuit on the stale count.
+    main = fake_model(
+        [
+            # turn 1: three drafts — grade rejects two, then retries run out.
+            AIMessage(content="Draft 1."),
+            AIMessage(content="Draft 2."),
+            AIMessage(content="Draft 3."),
+            # turn 2: rewrite consumes one response; grade rejects the first
+            # draft, and the retry produces the final answer.
+            AIMessage(content="Standalone follow-up?"),
+            AIMessage(content="Draft 4."),
+            AIMessage(content="Final answer."),
+        ]
+    )
+    grader = fake_grader(
+        [
+            AnswerGrade(grounded=True, complete=False, feedback="missing detail"),
+            AnswerGrade(grounded=True, complete=False, feedback="still missing"),
+            AnswerGrade(grounded=True, complete=False, feedback="missing again"),
+            AnswerGrade(grounded=True, complete=True, feedback=""),
+        ]
+    )
+    graph = build_graph(model=main, grader=grader)
+
+    first = ask(graph, "a hard question", thread_id="retries")
+    assert first.answer == "Draft 3."  # retries exhausted, third draft accepted
+
+    second = ask(graph, "a follow-up?", thread_id="retries")
+    # Stale retries would accept "Draft 4." without consulting the grader.
+    assert second.answer == "Final answer."
 
 
 @pytest.mark.usefixtures("seeded_db")
