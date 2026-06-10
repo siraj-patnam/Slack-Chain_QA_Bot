@@ -338,14 +338,18 @@ def build_graph(
 
     def rewrite(state: QAState) -> dict:
         messages = state["messages"]
+        # This turn's question is the message just appended by the caller. The
+        # SAME index is both the turn_msg_start stamp (read by agent/generate/
+        # grade) and the end of the prior-turn context used below — one value,
+        # so the stamp and the context window can't drift apart.
+        turn_msg_start = max(len(messages) - 1, 0)
         # rewrite runs exactly once per turn, so it is where the per-turn
         # counters reset: the budget measures from here (turn_tool_start) and
         # the self-correction retries start fresh. Without this, a thread's
         # earlier turns would permanently consume later turns' budget/retries.
         turn_start = {
             "turn_tool_start": _tool_call_count(messages),
-            # This turn's question is the message just appended by the caller.
-            "turn_msg_start": max(len(messages) - 1, 0),
+            "turn_msg_start": turn_msg_start,
             "retries": 0,
         }
         humans = [m for m in messages if isinstance(m, HumanMessage)]
@@ -358,7 +362,7 @@ def build_graph(
             return {**turn_start, "question": str(latest.content)}
         context = "\n".join(
             f"{'User' if isinstance(m, HumanMessage) else 'Bot'}: {m.content}"
-            for m in _history_skeleton(messages, len(messages) - 1)
+            for m in _history_skeleton(messages, turn_msg_start)
         )
         resolved = base.invoke(
             [

@@ -19,6 +19,7 @@ from app.graph import (
     _route_after_grade,
     build_graph,
 )
+from app.prompt import SCHEMA_PROMPT
 
 
 def _tool_call(name: str, query: str, call_id: str) -> AIMessage:
@@ -278,11 +279,12 @@ def test_agent_view_drops_prior_turn_tool_traffic(
     second = ask(graph, "a follow-up", thread_id="bounded")
     assert second.answer == "Second answer."
 
-    # The last agent call (its input leads with the schema system prompt).
+    # The last agent call — identified exactly: the planner is the one node
+    # whose input leads with the schema system prompt.
     agent_inputs = [
         c
         for c in main.calls
-        if "Northstar" in str(c[0].content)  # type: ignore[attr-defined]
+        if c[0].content == SCHEMA_PROMPT  # type: ignore[attr-defined]
     ]
     view = agent_inputs[-1]
     contents = [str(m.content) for m in view]
