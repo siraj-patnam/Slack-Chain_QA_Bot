@@ -78,3 +78,8 @@ docker run --rm --env-file .env -v "$PWD/data:/app/data" slack-qa-bot \
 CI (`.github/workflows/ci.yml`) runs `make check` on every PR and push to `main`,
 plus `make eval` as a regression gate on PRs. `main` is protected: required CI
 pass, up-to-date branches, no direct pushes (feature branch → PR → squash-merge).
+
+## Demo
+
+A short screen recording of the bot answering questions in Slack:
+[SlackBot_Demo (Google Drive)](https://drive.google.com/file/d/1SPtEwLTOezkrQqKu2jRfE2ryxRGK5r1U/view?usp=sharing)
