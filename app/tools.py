@@ -63,6 +63,25 @@ def _format_rows(columns: list[str], rows: list[sqlite3.Row], truncated: bool) -
     return out
 
 
+def _schema_hint() -> str:
+    """A compact table(columns) catalog, appended to bad-identifier errors so the
+    agent self-corrects in ONE retry instead of guessing column names repeatedly
+    (a wrong FK guess like scenarios.customer_id otherwise burns several calls)."""
+    with readonly_connection() as conn:
+        tables = [
+            r[0]
+            for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' "
+                "AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '%_fts%' ORDER BY name"
+            )
+        ]
+        lines = []
+        for t in tables:
+            cols = [r[1] for r in conn.execute(f'PRAGMA table_info("{t}")')]
+            lines.append(f"{t}({', '.join(cols)})")
+    return "Schema: " + "; ".join(lines)
+
+
 def _run_sql(query: str) -> str:
     """Core logic for run_sql; returns rows or an ``Error: ...`` string.
 
@@ -86,6 +105,8 @@ def _run_sql(query: str) -> str:
     except sqlite3.OperationalError as err:
         if "interrupted" in str(err).lower():
             return f"Error: query exceeded the {QUERY_TIMEOUT_S:g}s time limit."
+        if "no such column" in str(err) or "no such table" in str(err):
+            return f"Error: {err}. {_schema_hint()}"
         return f"Error: {err}"
     except sqlite3.Error as err:
         return f"Error: {err}"

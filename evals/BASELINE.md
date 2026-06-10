@@ -12,12 +12,16 @@ aggregate tool-call count is ratcheted against `baseline.json`.
 
 | Config | Accuracy | Held-out | Tool calls |
 |---|---|---|---|
-| Custom graph (default) | 93.75% (15/16) | 100% (4/4) | 31 |
-| Prebuilt `create_agent` (`USE_GRAPH=false`), same tools | 93.75% (15/16) | 100% (4/4) | 30 |
+| Custom graph (default) | 100% (16/16) | 100% (4/4) | 41 |
+| Prebuilt `create_agent` (`USE_GRAPH=false`), same tools | 100% (16/16) | 100% (4/4) | 34 |
 
 Numbers vary a few points run to run (a temperature-0 LLM agent is still not
-fully deterministic); the floors absorb that. These figures predate the `ex5`
-rescore below (the old run's single failure); regenerate with `--sync --update`.
+fully deterministic); the floors absorb that. The graph row is from the run
+that rewrote `baseline.json` after the ex5 agent-side fixes below (two
+consecutive full runs scored 16/16). The aggregate tool-call count rose from
+~31 to 41 — the intended price of the grader now sending the agent back to
+retrieve when part of a question is unanswered, instead of accepting a
+half-answer.
 
 ## Where the improvement came from
 
@@ -66,7 +70,7 @@ one defensible answer**, made unwinnable by a hardcoded gold:
 Live agent runs bear this out: across sampled runs it names BlueHarbor, Pioneer
 Freight, and the occasional genuine miss (NordFryst/Patchway).
 
-**Rescoring (this change).** The old gold hardcoded `must_include=("BlueHarbor",)`,
+**Rescoring (first change).** The old gold hardcoded `must_include=("BlueHarbor",)`,
 which auto-failed an equally-correct Pioneer answer *before the judge ran*. We
 removed that anchor and rewrote the rubric to score the **reasoning**: a correct
 answer names **either** BlueHarbor **or** Pioneer Freight and gives that account's
@@ -75,9 +79,50 @@ competitor (e.g. Patchway), or no milestone. Verified offline against four live
 ex5 answers — the two BlueHarbor and the Pioneer answers pass; the
 NordFryst→Patchway miss fails.
 
-> **Re-sync required.** The LangSmith dataset caches the reference, so this rubric
-> change only takes effect after `python -m evals.run --sync --update`, which also
-> re-baselines `total_tool_calls`. The "Current numbers" above predate the rescore.
+### ex5, part 2 — the agent-side root causes (fixed)
+
+After the rescore ex5 *still* failed every live run, for a different reason than
+the one documented above: tracing the agent's actual tool-call **arguments**
+(not just tool names) showed the failure mode had drifted. Four compounding
+agent bugs, all general (none ex5-specific):
+
+1. **Criterion substitution.** The agent matched the question's "defect /
+   renewal" wording to the `pain_point` value *"renewal risk caused by noisy
+   alerting"* and answered NordFryst — never checking the question's real
+   discriminator (*which competitor is the cheap tactical one*) against the
+   `competitors` table. Fix: the ranking rule in the prompt now says to resolve
+   an entity-describing qualifier in that entity's OWN table (pricing words →
+   `competitors.pricing_position`, role words → `segment`/`description`), then
+   join through the scenario FKs — and to finish by reading the finalists'
+   artifacts for any asked-for detail.
+2. **FK-direction stumbles + a silent SQLite trap.** The agent guessed
+   `scenarios.customer_id` (doesn't exist) three times, then wrote
+   `customer_id IN (SELECT customer_id FROM scenarios WHERE ...)` — SQLite
+   resolves the unknown column to the OUTER query, silently turning the filter
+   into a no-op that returned ALL at-risk accounts as "facing NoiseGuard".
+   Fixes: `run_sql` now appends a compact table(columns) catalog to
+   no-such-column/table errors so one bad guess self-corrects in one retry; the
+   prompt documents the FK direction and the correlated-subquery hazard.
+3. **Evidence window dropped the decisive results.** `_tool_results` kept the
+   FIRST ~9k chars of tool output, so when the budget bound, `generate` saw only
+   the opening exploration dumps and claimed retrieved facts "weren't found".
+   Fix: the window now keeps the most RECENT results (chronological order
+   preserved) — retrieval converges toward the answer.
+4. **The grader's refusal carve-out was too generous.** "I couldn't find the
+   milestone" was accepted as complete with 9+ of 14 tool calls unspent and no
+   query ever aimed at it. Fix: `grade` now sees the tool budget and only
+   accepts a "couldn't find" as complete when the evidence shows retrieval for
+   that specific part genuinely came up empty.
+
+Also fixed while here: synthetic "budget reached" ToolMessages (which close out
+unexecuted calls to keep saved history valid) no longer count as executed tool
+calls in `ask()`/`stream_run` or the graph's budget — they had inflated the
+per-case counts.
+
+Validated: ex5 went 0/4 → 4/4 in live batches (three of four runs produce the
+rubric's exact Pioneer milestone with citations), and two consecutive full-suite
+runs scored 16/16 with held-out 4/4 — the generalization gate the prompt rules
+must not regress.
 
 ## Methodology notes
 
